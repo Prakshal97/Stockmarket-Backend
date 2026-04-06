@@ -56,6 +56,10 @@ async def shutdown_event():
 
 # ─── Health Check ──────────────────────────────────────────────────────────
 
+@app.get("/")
+async def home():
+    return {"status": "NSE/BSE Financial Intelligence Agent Backend is live 🚀"}
+
 @app.get("/health")
 async def health():
     return {

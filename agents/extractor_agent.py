@@ -16,7 +16,7 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 # Use Gemini 1.5 Flash for speed and cost efficiency
-model = genai.GenerativeModel("gemini-1.5-flash") if GEMINI_API_KEY else None
+model = genai.GenerativeModel("gemini-1.5-flash-latest") if GEMINI_API_KEY else None
 
 EXTRACTION_PROMPT = """
 You are a financial analyst AI specializing in Indian stock markets (NSE/BSE).
