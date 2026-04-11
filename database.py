@@ -2,7 +2,7 @@
 MongoDB Atlas connection and CRUD operations using motor (async).
 """
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
@@ -88,7 +88,8 @@ async def get_announcements(
     search: Optional[str] = None
 ) -> List[dict]:
     """Fetch processed announcements with filters."""
-    query = {"processed": True}
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    query = {"processed": True, "announcement_date": {"$gte": cutoff}}
 
     if exchange:
         query["exchange"] = exchange
@@ -116,8 +117,9 @@ async def get_announcements(
 
 async def get_stats() -> dict:
     """Aggregate stats for dashboard."""
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
     pipeline = [
-        {"$match": {"processed": True}},
+        {"$match": {"processed": True, "announcement_date": {"$gte": cutoff}}},
         {"$group": {
             "_id": None,
             "total": {"$sum": 1},
@@ -151,7 +153,8 @@ async def get_stats() -> dict:
 async def get_total_count(query: dict = None) -> int:
     """Count total documents matching query."""
     if query is None:
-        query = {"processed": True}
+        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        query = {"processed": True, "announcement_date": {"$gte": cutoff}}
     return await db.announcements.count_documents(query)
 
 
@@ -168,9 +171,14 @@ async def get_last_fetch_time() -> Optional[str]:
 
 
 async def get_company_announcements(ticker: str, limit: int = 20) -> List[dict]:
-    """Get all announcements for a specific company."""
+    """Get all announcements for a specific company within the last 24 hours."""
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
     cursor = db.announcements.find(
-        {"ticker": {"$regex": ticker, "$options": "i"}, "processed": True},
+        {
+            "ticker": {"$regex": ticker, "$options": "i"}, 
+            "processed": True,
+            "announcement_date": {"$gte": cutoff}
+        },
         sort=[("announcement_date", -1)]
     ).limit(limit)
     return await cursor.to_list(length=limit)

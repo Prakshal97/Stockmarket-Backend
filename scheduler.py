@@ -71,6 +71,17 @@ async def run_pipeline():
     last_run["count"] = processed_count
 
     print(f"✅ Pipeline complete: {processed_count} announcements AI-processed")
+    
+    # Step 4: Cleanup announcements older than 24 hours to enforce strict 24h limit
+    try:
+        from database import db
+        import logging
+        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        del_result = await db.announcements.delete_many({"announcement_date": {"$lt": cutoff}})
+        print(f"🧹 Cleanup: Deleted {del_result.deleted_count} announcements older than 24 hours.")
+    except Exception as e:
+        print(f"⚠️ Cleanup failed: {e}")
+
     print(f"{'='*60}\n")
 
 
