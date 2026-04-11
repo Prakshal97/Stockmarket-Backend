@@ -26,6 +26,8 @@ async def connect_db():
     await db.announcements.create_index("announcement_date")
     await db.announcements.create_index("ticker")
     await db.announcements.create_index("processed")
+    # Compound index for faster feed queries (processed + date sort)
+    await db.announcements.create_index([("processed", 1), ("announcement_date", -1)])
     print("✅ Connected to MongoDB Atlas")
 
 

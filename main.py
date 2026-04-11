@@ -16,7 +16,7 @@ load_dotenv()
 app = FastAPI(
     title="NSE/BSE Financial Intelligence Agent",
     description="AI-powered corporate announcement analyzer for Indian stock markets",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # CORS for Next.js frontend
@@ -27,6 +27,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _safe(value, default="Not Available"):
+    """Ensure no field is ever empty, null, or blank in API responses."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped.lower() in ("null", "none", "n/a", "na"):
+            return default
+        return stripped
+    return value
 
 
 # ─── Startup / Shutdown ────────────────────────────────────────────────────
@@ -61,7 +73,8 @@ async def health():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "service": "NSE/BSE Financial Intelligence Agent"
+        "service": "NSE/BSE Financial Intelligence Agent",
+        "ai_engine": "Groq (LLaMA 3 70B)"
     }
 
 
@@ -97,6 +110,7 @@ async def get_announcements(
     for ann in announcements:
         ann["_id"] = str(ann.get("_id", ""))
         ai_data = ann.get("ai_data", {}) or {}
+
         try:
             ann_date = ann.get("announcement_date", "")
             if isinstance(ann_date, datetime):
@@ -104,30 +118,41 @@ async def get_announcements(
         except:
             ann_date = ""
 
+        # Determine created_at timestamp
+        created_at = ann.get("fetched_at") or ann.get("announcement_date", "")
+        if isinstance(created_at, datetime):
+            created_at = created_at.isoformat()
+
         results.append({
             "id": ann["_id"],
-            "exchange": ann.get("exchange", ""),
-            "company_name": ai_data.get("company_name") or ann.get("company_name", ""),
-            "ticker": ai_data.get("ticker") or ann.get("ticker", ""),
-            "announcement_type": ai_data.get("announcement_type", "Other"),
+            "exchange": _safe(ann.get("exchange"), "NSE"),
+            "company_name": _safe(ai_data.get("company_name") or ann.get("company_name")),
+            "ticker": _safe(ai_data.get("ticker") or ann.get("ticker")),
+            "announcement_type": _safe(ai_data.get("announcement_type"), "Other"),
+            "title": _safe(ai_data.get("title"), "ANNOUNCEMENT"),
+            "description": _safe(ai_data.get("description") or ai_data.get("key_details") or ann.get("raw_subject")),
             "announcement_date": ann_date,
-            "key_details": ai_data.get("key_details", ann.get("raw_subject", "")),
-            "revenue_profit_impact": ai_data.get("revenue_profit_impact"),
-            "sentiment": ai_data.get("sentiment", "Neutral"),
-            "impact_level": ai_data.get("impact_level", "Low"),
-            "ai_insight": ai_data.get("ai_insight", ""),
-            "trading_signal": ai_data.get("trading_signal", ""),
-            "sector": ai_data.get("sector", ""),
+            "key_details": _safe(ai_data.get("key_details") or ann.get("raw_subject")),
+            "revenue_profit_impact": _safe(ai_data.get("revenue_profit_impact")),
+            "sentiment": _safe(ai_data.get("sentiment"), "Neutral"),
+            "impact_level": _safe(ai_data.get("impact_level") or ai_data.get("impact"), "Low"),
+            "impact": _safe(ai_data.get("impact") or ai_data.get("impact_level"), "Low"),
+            "board_approval": _safe(ai_data.get("board_approval")),
+            "meeting_date": _safe(ai_data.get("meeting_date")),
+            "ai_insight": _safe(ai_data.get("ai_insight")),
+            "trading_signal": _safe(ai_data.get("trading_signal")),
+            "sector": _safe(ai_data.get("sector")),
             "cmp": ai_data.get("cmp"),
             "market_cap_cr": ai_data.get("market_cap_cr"),
-            "source_url": ann.get("source_url", ""),
+            "source_url": _safe(ann.get("source_url"), "#"),
             "pdf_url": ann.get("pdf_url"),
             "processed": ann.get("processed", False),
+            "created_at": _safe(created_at),
             "authorized_capital": ai_data.get("authorized_capital"),
         })
 
     total = await get_total_count()
-    return {"data": results, "total": total, "skip": skip, "limit": limit}
+    return {"announcements": results, "total": total, "skip": skip, "limit": limit}
 
 
 @app.get("/api/announcements/{announcement_id}")
@@ -228,20 +253,25 @@ async def get_company_profile(ticker: str, limit: int = Query(20, ge=1, le=100))
         ai_data = ann.get("ai_data", {}) or {}
         results.append({
             "id": ann["_id"],
-            "exchange": ann.get("exchange", ""),
-            "company_name": ai_data.get("company_name") or ann.get("company_name", ""),
-            "ticker": ann.get("ticker", ""),
-            "announcement_type": ai_data.get("announcement_type", "Other"),
+            "exchange": _safe(ann.get("exchange")),
+            "company_name": _safe(ai_data.get("company_name") or ann.get("company_name")),
+            "ticker": _safe(ann.get("ticker")),
+            "announcement_type": _safe(ai_data.get("announcement_type"), "Other"),
+            "title": _safe(ai_data.get("title"), "ANNOUNCEMENT"),
+            "description": _safe(ai_data.get("description") or ai_data.get("key_details")),
             "announcement_date": ann.get("announcement_date", ""),
-            "key_details": ai_data.get("key_details", ""),
-            "sentiment": ai_data.get("sentiment", "Neutral"),
-            "impact_level": ai_data.get("impact_level", "Low"),
-            "ai_insight": ai_data.get("ai_insight", ""),
-            "trading_signal": ai_data.get("trading_signal", ""),
-            "sector": ai_data.get("sector", ""),
+            "key_details": _safe(ai_data.get("key_details")),
+            "sentiment": _safe(ai_data.get("sentiment"), "Neutral"),
+            "impact_level": _safe(ai_data.get("impact_level") or ai_data.get("impact"), "Low"),
+            "impact": _safe(ai_data.get("impact") or ai_data.get("impact_level"), "Low"),
+            "board_approval": _safe(ai_data.get("board_approval")),
+            "meeting_date": _safe(ai_data.get("meeting_date")),
+            "ai_insight": _safe(ai_data.get("ai_insight")),
+            "trading_signal": _safe(ai_data.get("trading_signal")),
+            "sector": _safe(ai_data.get("sector")),
         })
 
-    return {"ticker": ticker, "count": len(results), "data": results}
+    return {"ticker": ticker, "count": len(results), "announcements": results}
 
 
 # ─── Manual Trigger ──────────────────────────────────────────────────────

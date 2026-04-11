@@ -17,12 +17,8 @@ NSE_USER_AGENT = os.getenv("NSE_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win6
 
 NSE_SESSION = requests.Session()
 NSE_SESSION.headers.update({
-    "User-Agent": NSE_USER_AGENT,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
-    "Connection": "keep-alive",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept": "application/json",
 })
 
 BSE_SESSION = requests.Session()
@@ -64,6 +60,7 @@ def fetch_nse_announcements(from_date: Optional[str] = None, to_date: Optional[s
         }
 
         response = NSE_SESSION.get(url, params=params, timeout=15)
+        print(f"DEBUG NSE Raw Response: {response.text[:500]}")
         response.raise_for_status()
         data = response.json()
 
