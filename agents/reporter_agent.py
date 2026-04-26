@@ -177,13 +177,28 @@ def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
         except:
             ann_date = ""
 
+        ticker = (ai_data.get("ticker") or ann.get("ticker", "")).upper()
+        existing_cap = auth_cap.get("existing_auth_eq_cap_inr")
+        if not existing_cap:
+            try:
+                import json
+                import os
+                master_path = os.path.join(os.path.dirname(__file__), "master_data.json")
+                if os.path.exists(master_path):
+                    with open(master_path, "r") as f:
+                        master_data = json.load(f)
+                    if ticker in master_data:
+                        existing_cap = master_data[ticker].get("existing_auth_cap")
+            except:
+                pass
+        
         row_data = [
             sr_no,
             ann_date,
             ai_data.get("company_name") or ann.get("company_name", ""),
             auth_cap.get("board_approval", ""),
             auth_cap.get("date_of_board_meeting", ""),
-            _fmt_currency(auth_cap.get("existing_auth_eq_cap_inr")),
+            _fmt_currency(existing_cap),
             _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("proposed_increase_inr")),
             _resolve_cmp(ai_data, mkt_cache),
@@ -286,18 +301,33 @@ def _create_all_announcements_sheet(ws, announcements: List[Dict], mkt_cache: di
         else:
             row_fill = PatternFill("solid", fgColor=COLORS["neutral_bg"]) if sr_no % 2 == 0 else None
 
+        ticker = (ai_data.get("ticker") or ann.get("ticker", "")).upper()
+        existing_cap = auth_cap.get("existing_auth_eq_cap_inr")
+        if not existing_cap:
+            try:
+                import json
+                import os
+                master_path = os.path.join(os.path.dirname(__file__), "master_data.json")
+                if os.path.exists(master_path):
+                    with open(master_path, "r") as f:
+                        master_data = json.load(f)
+                    if ticker in master_data:
+                        existing_cap = master_data[ticker].get("existing_auth_cap")
+            except:
+                pass
+        
         row_data = [
             sr_no,
             ann_date,
             ai_data.get("company_name") or ann.get("company_name", ""),
-            auth_cap.get("board_approval") or ai_data.get("board_approval", ""),
-            auth_cap.get("date_of_board_meeting") or ai_data.get("meeting_date", ""),
-            _fmt_currency(auth_cap.get("existing_auth_eq_cap_inr")),
+            auth_cap.get("board_approval") or ai_data.get("board_approval") or "Not Available",
+            auth_cap.get("date_of_board_meeting") or ai_data.get("meeting_date") or "Not Available",
+            _fmt_currency(existing_cap),
             _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("proposed_increase_inr")),
             _resolve_cmp(ai_data, mkt_cache),
             _resolve_market_cap(ai_data, mkt_cache),
-            ai_data.get("sector", ""),
+            ai_data.get("sector") or "General",
             remark_positive,
             remark_negative,
             ai_data.get("trading_signal", ""),
@@ -370,13 +400,28 @@ def _create_authorized_capital_sheet(ws, announcements: List[Dict], mkt_cache: d
         except:
             ann_date = ""
 
+        ticker = (ai_data.get("ticker") or ann.get("ticker", "")).upper()
+        existing_cap = auth_cap.get("existing_auth_eq_cap_inr")
+        if not existing_cap:
+            try:
+                import json
+                import os
+                master_path = os.path.join(os.path.dirname(__file__), "master_data.json")
+                if os.path.exists(master_path):
+                    with open(master_path, "r") as f:
+                        master_data = json.load(f)
+                    if ticker in master_data:
+                        existing_cap = master_data[ticker].get("existing_auth_cap")
+            except:
+                pass
+        
         row_data = [
             sr_no,
             ann_date,
             ai_data.get("company_name") or ann.get("company_name", ""),
             auth_cap.get("board_approval", ""),
             auth_cap.get("date_of_board_meeting", ""),
-            _fmt_currency(auth_cap.get("existing_auth_eq_cap_inr")),
+            _fmt_currency(existing_cap),
             _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("proposed_increase_inr")),
             _resolve_cmp(ai_data, mkt_cache),

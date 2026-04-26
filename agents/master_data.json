@@ -54,6 +54,31 @@
         "sector": "IT & Software",
         "industry": "IT Services"
     },
+    "JKCEMENT": {
+        "existing_auth_cap": 1300000000.0,
+        "sector": "Construction Materials",
+        "industry": "Cement"
+    },
+    "REFEX": {
+        "existing_auth_cap": 1000000000.0,
+        "sector": "Industrial Products",
+        "industry": "Industrial Gases"
+    },
+    "SEJALLTD": {
+        "existing_auth_cap": 1200000000.0,
+        "sector": "Consumer Discretionary",
+        "industry": "Glass & Glass Products"
+    },
+    "DSFCL": {
+        "existing_auth_cap": 405250000.0,
+        "sector": "Chemicals",
+        "industry": "Speciality Chemicals"
+    },
+    "WEWORK": {
+        "existing_auth_cap": 1353800000.0,
+        "sector": "Real Estate",
+        "industry": "Commercial Services"
+    },
     "HCLTECH": {
         "existing_auth_cap": 3000000000.0,
         "sector": "IT & Software",
