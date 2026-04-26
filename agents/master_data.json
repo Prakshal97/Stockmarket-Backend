@@ -1,0 +1,62 @@
+{
+    "DUCON": {
+        "existing_auth_cap": 400000000.0,
+        "sector": "Engineering & EPC",
+        "industry": "Industrial Manufacturing"
+    },
+    "POLYCAB": {
+        "existing_auth_cap": 1892500000.0,
+        "sector": "Consumer Durables",
+        "industry": "Cables & Wires"
+    },
+    "MOTISONS": {
+        "existing_auth_cap": 1250000000.0,
+        "sector": "Consumer Discretionary",
+        "industry": "Jewellery"
+    },
+    "TCS": {
+        "existing_auth_cap": 3750000000.0,
+        "sector": "IT & Software",
+        "industry": "IT Services"
+    },
+    "ONGC": {
+        "existing_auth_cap": 128500000000.0,
+        "sector": "Energy",
+        "industry": "Oil & Gas"
+    },
+    "RELIANCE": {
+        "existing_auth_cap": 150000000000.0,
+        "sector": "Energy / Diversified",
+        "industry": "Refining & Retail"
+    },
+    "HDFCBANK": {
+        "existing_auth_cap": 8500000000.0,
+        "sector": "Banking",
+        "industry": "Private Sector Bank"
+    },
+    "INFY": {
+        "existing_auth_cap": 24000000000.0,
+        "sector": "IT & Software",
+        "industry": "IT Services"
+    },
+    "ADANIENT": {
+        "existing_auth_cap": 11500000000.0,
+        "sector": "Metals & Mining",
+        "industry": "Trading"
+    },
+    "MARUTI": {
+        "existing_auth_cap": 1900000000.0,
+        "sector": "Auto",
+        "industry": "Passenger Cars"
+    },
+    "WIPRO": {
+        "existing_auth_cap": 25000000000.0,
+        "sector": "IT & Software",
+        "industry": "IT Services"
+    },
+    "HCLTECH": {
+        "existing_auth_cap": 3000000000.0,
+        "sector": "IT & Software",
+        "industry": "IT Services"
+    }
+}

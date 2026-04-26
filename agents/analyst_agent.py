@@ -101,9 +101,49 @@ def enrich_announcement(announcement: dict, ai_data: dict) -> dict:
                 val = existing_auth.get(key)
             merged_auth[key] = val
             
+        # --- Master Data Lookup Fallback ---
+        try:
+            import json
+            import os
+            master_path = os.path.join(os.path.dirname(__file__), "master_data.json")
+            if os.path.exists(master_path):
+                with open(master_path, "r") as f:
+                    master_data = json.load(f)
+                
+                ticker = ai_data.get("ticker") or announcement.get("ticker", "")
+                if ticker in master_data:
+                    m = master_data[ticker]
+                    # Master data is more reliable than AI for "Existing" capital
+                    if m.get("existing_auth_cap"):
+                        merged_auth["existing_auth_eq_cap_inr"] = m.get("existing_auth_cap")
+                        print(f"INFO: Priority Resolved existing capital for {ticker} from master data: {merged_auth['existing_auth_eq_cap_inr']}")
+                    
+                    if m.get("sector"):
+                        ai_data["sector"] = m.get("sector")
+        except Exception as me:
+            print(f"WARNING: Master data lookup failed: {me}")
+
+        # Sanitize common AI errors (e.g., face value being picked as capital)
+        for key in ["existing_auth_eq_cap_inr", "new_auth_eq_cap_inr"]:
+            val = merged_auth.get(key)
+            if val is not None and isinstance(val, (int, float)) and val < 1000000:
+                # If less than 10 Lakh, it's likely a face value or error
+                merged_auth[key] = None
+
         # If we found actual amounts or if it's already this type, ensure the type is set correctly
         if merged_auth.get("new_auth_eq_cap_inr") or ai_data.get("announcement_type") == "Increase in Authorized Capital":
             ai_data["announcement_type"] = "Increase in Authorized Capital"
+            
+            # Recalculate increase if we now have both
+            if merged_auth.get("existing_auth_eq_cap_inr") and merged_auth.get("new_auth_eq_cap_inr"):
+                try:
+                    e = float(merged_auth["existing_auth_eq_cap_inr"])
+                    n = float(merged_auth["new_auth_eq_cap_inr"])
+                    if n > e:
+                        merged_auth["proposed_increase_inr"] = n - e
+                except:
+                    pass
+
             ai_data["authorized_capital"] = merged_auth
 
     # Add trading signals

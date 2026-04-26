@@ -24,7 +24,7 @@ if GROQ_API_KEY:
     except Exception as e:
         print(f"WARNING: Groq init error: {e}")
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 EXTRACTION_PROMPT = """You are a financial analyst AI specializing in Indian stock markets (NSE/BSE).
 Analyze the following corporate announcement and extract structured financial intelligence.

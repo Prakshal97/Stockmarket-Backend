@@ -223,6 +223,11 @@ def extract_pdf_text(pdf_url: str) -> Optional[str]:
 
                 # Extract tables (capital figures often live in tables)
                 tables = page.extract_tables()
+                
+                # If no tables found with default settings, try "stream" mode (good for borderless tables)
+                if not tables:
+                    tables = page.extract_tables(table_settings={"vertical_strategy": "text", "horizontal_strategy": "text"})
+
                 for table in tables:
                     for row in table:
                         if row:
