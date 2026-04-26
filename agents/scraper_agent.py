@@ -202,23 +202,40 @@ def fetch_bse_announcements(from_date: Optional[str] = None, to_date: Optional[s
 
 
 def extract_pdf_text(pdf_url: str) -> Optional[str]:
-    """Download and extract text from a PDF announcement."""
+    """Download and extract text + tables from a PDF announcement."""
     try:
         import pdfplumber
         import io
 
-        response = requests.get(pdf_url, timeout=20, headers={"User-Agent": NSE_USER_AGENT})
+        response = requests.get(pdf_url, timeout=20, headers={
+            "User-Agent": NSE_USER_AGENT,
+            "Referer": "https://www.nseindia.com/"
+        })
         response.raise_for_status()
 
+        text_parts = []
         with pdfplumber.open(io.BytesIO(response.content)) as pdf:
-            text = ""
-            for page in pdf.pages[:5]:  # Max 5 pages
+            for page in pdf.pages[:8]:  # Up to 8 pages
+                # Extract plain text
                 page_text = page.extract_text()
                 if page_text:
-                    text += page_text + "\n"
-        return text[:5000]  # Limit for AI context
+                    text_parts.append(page_text)
+
+                # Extract tables (capital figures often live in tables)
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if row:
+                            row_str = " | ".join(
+                                str(cell).strip() for cell in row if cell and str(cell).strip()
+                            )
+                            if row_str:
+                                text_parts.append(row_str)
+
+        full_text = "\n".join(text_parts)
+        return full_text[:6000]  # Slightly larger limit for richer context
     except Exception as e:
-        print(f"⚠️ PDF extraction failed for {pdf_url}: {e}")
+        print(f"WARNING: PDF extraction failed for {pdf_url}: {e}")
         return None
 
 

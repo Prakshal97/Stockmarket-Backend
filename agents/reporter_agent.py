@@ -332,8 +332,10 @@ def _create_all_announcements_sheet(ws, announcements: List[Dict], mkt_cache: di
     ws.freeze_panes = "A3"
 
 
-def _create_authorized_capital_sheet(ws, announcements: List[Dict]):
+def _create_authorized_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict = None):
     """Mirror of the user's exact Excel format."""
+    if mkt_cache is None:
+        mkt_cache = {}
     ws.merge_cells("A1:K1")
     title_cell = ws["A1"]
     title_cell.value = "Increase in Authorized Capital"
@@ -377,8 +379,8 @@ def _create_authorized_capital_sheet(ws, announcements: List[Dict]):
             _fmt_currency(auth_cap.get("existing_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("proposed_increase_inr")),
-            ai_data.get("cmp", "Unavailable") or "Unavailable",
-            ai_data.get("market_cap_cr", "Unavailable") or "Unavailable",
+            _resolve_cmp(ai_data, mkt_cache),
+            _resolve_market_cap(ai_data, mkt_cache),
             ai_data.get("sector", ""),
         ]
 

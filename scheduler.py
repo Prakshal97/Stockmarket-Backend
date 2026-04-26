@@ -50,12 +50,13 @@ async def run_pipeline():
     for ann in unprocessed:
         try:
             # If PDF exists, extract its text to give the AI proper context
-            if ann.get("pdf_url") and len(ann.get("raw_body", "")) < 500:
+            is_auth_cap = "authorized capital" in ann.get("raw_subject", "").lower() or "authorised capital" in ann.get("raw_subject", "").lower()
+            if ann.get("pdf_url") and (len(ann.get("raw_body", "")) < 500 or is_auth_cap):
                 from agents.scraper_agent import extract_pdf_text
                 print(f"INFO: Extracting PDF text for {ann.get('company_name')}...")
                 pdf_text = await asyncio.to_thread(extract_pdf_text, ann["pdf_url"])
                 if pdf_text:
-                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_text)[:5000]
+                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_text)[:6000]
 
             # AI Extraction
             ai_data = await asyncio.to_thread(extract_announcement, ann)

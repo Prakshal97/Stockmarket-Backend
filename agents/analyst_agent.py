@@ -144,8 +144,11 @@ def _rule_based_sentiment(text: str) -> str:
 
 def _extract_auth_capital_from_text(text: str) -> dict:
     """
-    Try to extract authorized capital figures from raw text using regex.
-    Matches patterns like 'Rs 100 Crore', '100,00,00,000', etc.
+    Extract authorized capital figures from raw text using context-aware regex.
+    Handles patterns like:
+      - "from Rs 100 Crore to Rs 200 Crore"
+      - "Existing: Rs 5,75,00,000  New: Rs 10,00,00,000"
+      - "increase of Rs 50 Crore"
     """
     import re
 
@@ -157,50 +160,118 @@ def _extract_auth_capital_from_text(text: str) -> dict:
         "proposed_increase_inr": None,
     }
 
-    # Board approval
-    if "board approved" in text or "board approves" in text or "approved by the board" in text:
-        auth_cap["board_approval"] = "Yes"
-    elif "no board approval" in text or "shareholders approval" in text:
-        auth_cap["board_approval"] = "No"
+    t = text.lower()
 
-    # Date patterns: DD-MM-YYYY, DD/MM/YYYY, DDth Month YYYY
+    # ── Board approval ───────────────────────────────────────────
+    if any(p in t for p in ["board approved", "board approves", "approved by the board", "board of directors approved"]):
+        auth_cap["board_approval"] = "Yes"
+    elif any(p in t for p in ["shareholders approval", "postal ballot", "subject to approval"]):
+        auth_cap["board_approval"] = "Pending Shareholder Approval"
+
+    # ── Date of board meeting ────────────────────────────────────
     date_patterns = [
         r'\b(\d{2}[-/]\d{2}[-/]\d{4})\b',
-        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4})\b',
+        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*,?\s+\d{4})\b',
+        r'\b(\d{1,2}[-/]\d{1,2}[-/]\d{4})\b',
     ]
-    for pattern in date_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            auth_cap["date_of_board_meeting"] = match.group(1)
+    for pat in date_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            auth_cap["date_of_board_meeting"] = m.group(1)
             break
 
-    # Crore amounts (e.g., Rs 100 Crore, 100 Cr, 100.50 Crores)
-    crore_matches = re.findall(r'(?:rs\.?|inr)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:crore|cr|cr\.)', text, re.IGNORECASE)
-    
-    # Direct Rupee amounts (e.g., 1,00,00,00,000)
-    direct_matches = re.findall(r'(?:rs\.?|inr)?\s*(\d{1,3}(?:,\d{2,3})+)', text)
-    
-    all_amounts = []
-    if crore_matches:
-        try:
-            all_amounts.extend([float(m.replace(",", "")) * 1_00_00_000 for m in crore_matches])
-        except: pass
-    
-    if direct_matches:
-        try:
-            all_amounts.extend([float(m.replace(",", "")) for m in direct_matches])
-        except: pass
+    # ── Helper: parse a number string (crore or raw INR) ─────────
+    def parse_amount(s: str) -> float:
+        """Convert text like '100 Crore', '1,00,00,000', '5.75 Cr' → INR float."""
+        s = s.strip().replace(",", "")
+        crore_match = re.search(r'([\d.]+)\s*(?:crore|cr\.?)\b', s, re.IGNORECASE)
+        if crore_match:
+            return float(crore_match.group(1)) * 1_00_00_000
+        lakh_match = re.search(r'([\d.]+)\s*(?:lakh|lac)\b', s, re.IGNORECASE)
+        if lakh_match:
+            return float(lakh_match.group(1)) * 1_00_000
+        # Raw number (could be INR directly, e.g. 57,50,00,000 → already stripped commas)
+        num_match = re.search(r'([\d.]+)', s)
+        if num_match:
+            return float(num_match.group(1))
+        return 0.0
 
-    if len(all_amounts) >= 2:
-        all_amounts.sort()
-        # Assume smallest is existing, largest is new
-        auth_cap["existing_auth_eq_cap_inr"] = all_amounts[0]
-        auth_cap["new_auth_eq_cap_inr"] = all_amounts[-1]
-        auth_cap["proposed_increase_inr"] = all_amounts[-1] - all_amounts[0]
-    elif len(all_amounts) == 1:
-        # If only one amount, it's likely the new or increase
-        auth_cap["new_auth_eq_cap_inr"] = all_amounts[0]
+    # ── Pattern 1: "from Rs X to Rs Y" ──────────────────────────
+    from_to = re.search(
+        r'from\s+(?:rs\.?|inr\.?)?\s*([\d,]+(?:\.\d+)?(?:\s*(?:crore|cr\.?|lakh|lac))?)'
+        r'\s+to\s+(?:rs\.?|inr\.?)?\s*([\d,]+(?:\.\d+)?(?:\s*(?:crore|cr\.?|lakh|lac))?)',
+        text, re.IGNORECASE
+    )
+    if from_to:
+        existing = parse_amount(from_to.group(1))
+        new = parse_amount(from_to.group(2))
+        if existing > 0 and new > 0 and new != existing:
+            auth_cap["existing_auth_eq_cap_inr"] = existing
+            auth_cap["new_auth_eq_cap_inr"] = new
+            auth_cap["proposed_increase_inr"] = new - existing
 
+    # ── Pattern 2: "increase of Rs X" (when we only have delta) ──
+    if auth_cap["proposed_increase_inr"] is None:
+        increase_match = re.search(
+            r'(?:increase\s+of|by\s+(?:rs\.?|inr\.?))\s*([\d,]+(?:\.\d+)?(?:\s*(?:crore|cr\.?|lakh|lac))?)',
+            text, re.IGNORECASE
+        )
+        if increase_match:
+            auth_cap["proposed_increase_inr"] = parse_amount(increase_match.group(1))
+
+    # ── Pattern 3: "existing capital: X" / "new/revised capital: Y" ──
+    if auth_cap["existing_auth_eq_cap_inr"] is None:
+        existing_patterns = [
+            r'(?:existing|present|current)\s+(?:authorized|authorised)?\s*(?:share\s+)?capital[:\s]+(?:rs\.?|inr\.?)?\s*([\d,]+(?:\.\d+)?(?:\s*(?:crore|cr\.?|lakh|lac))?)',
+            r'(?:from)\s+(?:rs\.?|inr\.?)?\s*([\d,]+(?:\.\d+)?(?:\s*(?:crore|cr\.?|lakh|lac))?)',
+        ]
+        for pat in existing_patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                val = parse_amount(m.group(1))
+                if val > 0:
+                    auth_cap["existing_auth_eq_cap_inr"] = val
+                    break
+
+    if auth_cap["new_auth_eq_cap_inr"] is None:
+        new_patterns = [
+            r'(?:new|revised|increased|proposed)\s+(?:authorized|authorised)?\s*(?:share\s+)?capital[:\s]+(?:rs\.?|inr\.?)?\s*([\d,]+(?:\.\d+)?(?:\s*(?:crore|cr\.?|lakh|lac))?)',
+            r'(?:to)\s+(?:rs\.?|inr\.?)?\s*([\d,]+(?:\.\d+)?(?:\s*(?:crore|cr\.?|lakh|lac))?)',
+        ]
+        for pat in new_patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                val = parse_amount(m.group(1))
+                if val > 0:
+                    auth_cap["new_auth_eq_cap_inr"] = val
+                    break
+
+    # ── Pattern 4: Table-style rows like "57,50,00,000 | 1,00,00,00,000" ──
+    # (pdfplumber table rows joined with " | ")
+    if auth_cap["existing_auth_eq_cap_inr"] is None:
+        # Look for two large raw INR numbers side by side
+        big_nums = re.findall(r'\b(\d{1,3}(?:,\d{2,3}){3,})\b', text)
+        if len(big_nums) >= 2:
+            vals = []
+            for n in big_nums:
+                try:
+                    vals.append(float(n.replace(",", "")))
+                except:
+                    pass
+            vals = sorted(set(vals))
+            if len(vals) >= 2 and vals[-1] != vals[0]:
+                auth_cap["existing_auth_eq_cap_inr"] = vals[0]
+                auth_cap["new_auth_eq_cap_inr"] = vals[-1]
+                auth_cap["proposed_increase_inr"] = vals[-1] - vals[0]
+
+    # ── Compute proposed increase if we have both ─────────────────
+    if (auth_cap["proposed_increase_inr"] is None
+            and auth_cap["existing_auth_eq_cap_inr"] is not None
+            and auth_cap["new_auth_eq_cap_inr"] is not None
+            and auth_cap["new_auth_eq_cap_inr"] > auth_cap["existing_auth_eq_cap_inr"]):
+        auth_cap["proposed_increase_inr"] = (
+            auth_cap["new_auth_eq_cap_inr"] - auth_cap["existing_auth_eq_cap_inr"]
+        )
 
     return auth_cap
 
