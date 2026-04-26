@@ -4,7 +4,7 @@ every N minutes automatically.
 """
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -65,6 +65,21 @@ async def run_pipeline():
             # Rule-based enrichment
             ai_data = enrich_announcement(ann, ai_data)
 
+            # Fetch live CMP & Market Cap (yfinance / NSE API)
+            ticker = ai_data.get("ticker") or ann.get("ticker", "")
+            if ticker and (ai_data.get("cmp") is None or ai_data.get("market_cap_cr") is None):
+                try:
+                    from agents.market_data import get_market_data
+                    mkt = await asyncio.to_thread(get_market_data, ticker, ann.get("exchange", "NSE"))
+                    if mkt.get("cmp") is not None:
+                        ai_data["cmp"] = mkt["cmp"]
+                    if mkt.get("market_cap_cr") is not None:
+                        ai_data["market_cap_cr"] = mkt["market_cap_cr"]
+                    if mkt.get("cmp"):
+                        print(f"INFO: Market data for {ticker}: CMP={mkt['cmp']}, MktCap={mkt['market_cap_cr']} Cr")
+                except Exception as me:
+                    print(f"WARNING: Market data fetch failed for {ticker}: {me}")
+
             # Build Excel row
             excel_row = _build_excel_row(ann, ai_data)
 
@@ -83,7 +98,6 @@ async def run_pipeline():
     # Step 4: Cleanup announcements older than 24 hours to enforce strict 24h limit
     try:
         from database import db
-        import logging
         cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat() + "Z"
         del_result = await db.announcements.delete_many({"announcement_date": {"$lt": cutoff}})
         print(f"CLEANUP: Deleted {del_result.deleted_count} announcements older than 24 hours.")

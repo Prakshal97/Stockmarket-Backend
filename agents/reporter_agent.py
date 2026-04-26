@@ -14,6 +14,73 @@ from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
 
 
+def _prefetch_market_data(announcements: List[Dict]) -> dict:
+    """
+    Pre-fetch live CMP & Market Cap for all unique tickers in the batch.
+    Returns a dict: {clean_ticker: {'cmp': float|None, 'market_cap_cr': float|None}}
+    """
+    try:
+        from agents.market_data import batch_get_market_data, _clean_ticker
+        tickers = []
+        for ann in announcements:
+            ai_data = ann.get("ai_data", {}) or {}
+            t = ai_data.get("ticker") or ann.get("ticker", "")
+            if t:
+                tickers.append(t)
+        if not tickers:
+            return {}
+        return batch_get_market_data(tickers)
+    except Exception as e:
+        print(f"WARNING: batch market data prefetch failed: {e}")
+        return {}
+
+
+def _resolve_cmp(ai_data: dict, mkt_cache: dict) -> str:
+    """Return CMP as formatted string from DB value or live fetch."""
+    val = ai_data.get("cmp")
+    if val is not None:
+        try:
+            return f"₹{float(val):,.2f}"
+        except:
+            return str(val)
+    # Try live cache
+    ticker = ai_data.get("ticker", "")
+    if ticker:
+        try:
+            from agents.market_data import _clean_ticker
+            clean = _clean_ticker(ticker)
+            mkt = mkt_cache.get(clean, {})
+            live_cmp = mkt.get("cmp")
+            if live_cmp is not None:
+                return f"₹{float(live_cmp):,.2f}"
+        except:
+            pass
+    return "Unavailable"
+
+
+def _resolve_market_cap(ai_data: dict, mkt_cache: dict) -> str:
+    """Return Market Cap as formatted string from DB value or live fetch."""
+    val = ai_data.get("market_cap_cr")
+    if val is not None:
+        try:
+            return f"₹{float(val):,.2f} Cr"
+        except:
+            return str(val)
+    # Try live cache
+    ticker = ai_data.get("ticker", "")
+    if ticker:
+        try:
+            from agents.market_data import _clean_ticker
+            clean = _clean_ticker(ticker)
+            mkt = mkt_cache.get(clean, {})
+            live_mcap = mkt.get("market_cap_cr")
+            if live_mcap is not None:
+                return f"₹{float(live_mcap):,.2f} Cr"
+        except:
+            pass
+    return "Unavailable"
+
+
 # Color palette
 COLORS = {
     "header_bg": "1E3A5F",       # Deep navy
@@ -63,6 +130,8 @@ def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
     D O B M | Exist Auth Eq Cap (INR) | New Auth Eq Cap (INR) |
     Proposed Increase (INR) | CMP | M cap (In Cr) | Sector
     """
+    # Pre-fetch live market data for all tickers at once
+    mkt_cache = _prefetch_market_data(announcements)
     wb = Workbook()
     ws = wb.active
     ws.title = "Authorized Capital"
@@ -117,8 +186,8 @@ def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
             _fmt_currency(auth_cap.get("existing_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("proposed_increase_inr")),
-            ai_data.get("cmp") or "Unavailable",
-            ai_data.get("market_cap_cr") or "Unavailable",
+            _resolve_cmp(ai_data, mkt_cache),
+            _resolve_market_cap(ai_data, mkt_cache),
             ai_data.get("sector", ""),
         ]
 
@@ -148,17 +217,22 @@ def generate_full_report_excel(announcements: List[Dict]) -> bytes:
     """
     Generate a comprehensive Excel report with the exact fields requested by the user.
     """
+    # Pre-fetch live market data for all tickers at once
+    mkt_cache = _prefetch_market_data(announcements)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Full AI Report"
 
-    _create_all_announcements_sheet(ws, announcements)
+    _create_all_announcements_sheet(ws, announcements, mkt_cache)
 
     return _save_workbook_bytes(wb)
 
 
-def _create_all_announcements_sheet(ws, announcements: List[Dict]):
+def _create_all_announcements_sheet(ws, announcements: List[Dict], mkt_cache: dict = None):
     """Create the unified announcements sheet."""
+    if mkt_cache is None:
+        mkt_cache = {}
     # Title
     ws.merge_cells("A1:O1")
     title = ws["A1"]
@@ -221,8 +295,8 @@ def _create_all_announcements_sheet(ws, announcements: List[Dict]):
             _fmt_currency(auth_cap.get("existing_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
             _fmt_currency(auth_cap.get("proposed_increase_inr")),
-            ai_data.get("cmp", "Unavailable") or "Unavailable",
-            ai_data.get("market_cap_cr", "Unavailable") or "Unavailable",
+            _resolve_cmp(ai_data, mkt_cache),
+            _resolve_market_cap(ai_data, mkt_cache),
             ai_data.get("sector", ""),
             remark_positive,
             remark_negative,
