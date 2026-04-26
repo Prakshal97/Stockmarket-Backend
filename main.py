@@ -1,11 +1,16 @@
 """
 FastAPI Backend — Main application entry point.
-Routes: /announcements, /excel, /analyze, /stats, /trigger
+Routes:
+  /api/authorized-capital   — Auth capital announcements (PRIMARY)
+  /api/announcements        — General announcements (SECONDARY)
+  /api/stats                — Segregated statistics
+  /api/excel/*              — Excel exports
+  /api/trigger              — Manual pipeline trigger
 """
 import os
 import sys
 
-# Force UTF-8 output on Windows to prevent charmap errors from yfinance logs
+# Force UTF-8 output on Windows
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -15,7 +20,7 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 
 import io
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 from fastapi import FastAPI, Query, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -24,9 +29,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI(
-    title="NSE/BSE Financial Intelligence Agent",
-    description="AI-powered corporate announcement analyzer for Indian stock markets",
-    version="2.0.0"
+    title="AlphaIntel — NSE/BSE Financial Intelligence Agent",
+    description="AI-powered corporate announcement analyzer with segregated Authorized Capital tracking",
+    version="3.0.0"
 )
 
 # CORS for Next.js frontend
@@ -59,7 +64,6 @@ async def startup_event():
     from scheduler import start_scheduler, run_pipeline
     await connect_db()
     start_scheduler()
-    # Run pipeline immediately on start to populate data
     import asyncio
     asyncio.create_task(run_pipeline())
 
@@ -76,19 +80,91 @@ async def shutdown_event():
 
 @app.get("/")
 async def home():
-    return {"status": "NSE/BSE Financial Intelligence Agent Backend is live 🚀"}
+    return {"status": "AlphaIntel v3.0 — Segregated Pipeline is LIVE 🚀"}
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "service": "NSE/BSE Financial Intelligence Agent",
-        "ai_engine": "Groq (LLaMA 3 70B)"
+        "service": "AlphaIntel — NSE/BSE Financial Intelligence Agent",
+        "ai_engine": "Groq (LLaMA 3.1)",
+        "pipeline": "segregated (auth_capital + general)"
     }
 
 
-# ─── Announcements API ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 1: AUTHORIZED CAPITAL API (PRIMARY PRIORITY)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/authorized-capital")
+async def get_authorized_capital(
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+):
+    """Fetch ONLY authorized capital announcements. Top priority data."""
+    from database import get_authorized_capital_list, get_authorized_capital_count
+
+    announcements = await get_authorized_capital_list(limit=limit, skip=skip)
+
+    results = []
+    for ann in announcements:
+        ann["_id"] = str(ann.get("_id", ""))
+        ai_data = ann.get("ai_data", {}) or {}
+        auth_data = ann.get("auth_data", {}) or {}
+        auth_cap = ai_data.get("authorized_capital", {}) or {}
+
+        # Merge deterministic auth_data (priority) with AI auth_cap
+        merged_auth = {**auth_cap}
+        for key, val in auth_data.items():
+            if val is not None and val != "Not Available":
+                merged_auth[key] = val
+
+        try:
+            ann_date = ann.get("announcement_date", "")
+            if isinstance(ann_date, datetime):
+                ann_date = ann_date.isoformat()
+        except:
+            ann_date = ""
+
+        created_at = ann.get("fetched_at") or ann.get("announcement_date", "")
+        if isinstance(created_at, datetime):
+            created_at = created_at.isoformat()
+
+        results.append({
+            "id": ann["_id"],
+            "category": "authorized_capital",
+            "exchange": _safe(ann.get("exchange"), "NSE"),
+            "company_name": _safe(ai_data.get("company_name") or ann.get("company_name")),
+            "ticker": _safe(ai_data.get("ticker") or ann.get("ticker")),
+            "announcement_type": "Increase in Authorized Capital",
+            "title": _safe(ai_data.get("title"), "AUTH CAPITAL"),
+            "description": _safe(ai_data.get("description") or ai_data.get("key_details") or ann.get("raw_subject")),
+            "announcement_date": ann_date,
+            "board_approval": _safe(merged_auth.get("board_approval")),
+            "date_of_board_meeting": _safe(merged_auth.get("date_of_board_meeting")),
+            "existing_auth_eq_cap_inr": merged_auth.get("existing_auth_eq_cap_inr"),
+            "new_auth_eq_cap_inr": merged_auth.get("new_auth_eq_cap_inr"),
+            "proposed_increase_inr": merged_auth.get("proposed_increase_inr"),
+            "cmp": ai_data.get("cmp"),
+            "market_cap_cr": ai_data.get("market_cap_cr"),
+            "sector": _safe(ai_data.get("sector")),
+            "sentiment": _safe(ai_data.get("sentiment"), "Neutral"),
+            "impact": _safe(ai_data.get("impact") or ai_data.get("impact_level"), "Medium"),
+            "ai_insight": _safe(ai_data.get("ai_insight")),
+            "trading_signal": _safe(ai_data.get("trading_signal")),
+            "source_url": _safe(ann.get("source_url"), "#"),
+            "pdf_url": ann.get("pdf_url"),
+            "created_at": _safe(created_at),
+        })
+
+    total = await get_authorized_capital_count()
+    return {"announcements": results, "total": total, "skip": skip, "limit": limit}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SECTION 2: GENERAL ANNOUNCEMENTS API (SECONDARY)
+# ═══════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/announcements")
 async def get_announcements(
@@ -101,21 +177,16 @@ async def get_announcements(
     ticker: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
 ):
-    """Fetch processed announcements with optional filters."""
-    from database import get_announcements, get_total_count
+    """Fetch general (non-auth-capital) announcements with optional filters."""
+    from database import get_general_announcements, get_general_count
 
-    announcements = await get_announcements(
-        limit=limit,
-        skip=skip,
-        exchange=exchange,
-        announcement_type=announcement_type,
-        sentiment=sentiment,
-        impact=impact,
-        ticker=ticker,
-        search=search
+    announcements = await get_general_announcements(
+        limit=limit, skip=skip,
+        exchange=exchange, announcement_type=announcement_type,
+        sentiment=sentiment, impact=impact,
+        ticker=ticker, search=search
     )
 
-    # Serialize MongoDB docs
     results = []
     for ann in announcements:
         ann["_id"] = str(ann.get("_id", ""))
@@ -128,13 +199,13 @@ async def get_announcements(
         except:
             ann_date = ""
 
-        # Determine created_at timestamp
         created_at = ann.get("fetched_at") or ann.get("announcement_date", "")
         if isinstance(created_at, datetime):
             created_at = created_at.isoformat()
 
         results.append({
             "id": ann["_id"],
+            "category": "general",
             "exchange": _safe(ann.get("exchange"), "NSE"),
             "company_name": _safe(ai_data.get("company_name") or ann.get("company_name")),
             "ticker": _safe(ai_data.get("ticker") or ann.get("ticker")),
@@ -158,34 +229,17 @@ async def get_announcements(
             "pdf_url": ann.get("pdf_url"),
             "processed": ann.get("processed", False),
             "created_at": _safe(created_at),
-            "authorized_capital": ai_data.get("authorized_capital"),
         })
 
-    total = await get_total_count()
+    total = await get_general_count()
     return {"announcements": results, "total": total, "skip": skip, "limit": limit}
-
-
-@app.get("/api/announcements/{announcement_id}")
-async def get_announcement_detail(announcement_id: str):
-    """Get a single announcement by MongoDB ID."""
-    from database import db
-    from bson import ObjectId
-
-    try:
-        doc = await db.announcements.find_one({"_id": ObjectId(announcement_id)})
-        if not doc:
-            raise HTTPException(status_code=404, detail="Announcement not found")
-        doc["_id"] = str(doc["_id"])
-        return doc
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ─── Stats API ───────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
-async def get_stats():
-    """Dashboard statistics."""
+async def get_stats_endpoint():
+    """Dashboard statistics with segregated counts."""
     from database import get_stats, get_last_fetch_time
     from scheduler import last_run
 
@@ -194,35 +248,38 @@ async def get_stats():
     return stats
 
 
-# ─── Excel Export API ────────────────────────────────────────────────────
+# ─── Excel Export APIs ───────────────────────────────────────────────────
+
+@app.get("/api/excel/segregated-report")
+async def download_segregated_excel(
+    limit: int = Query(500, ge=1, le=2000),
+):
+    """Download the dual-section Excel: Sheet 1 = Auth Capital, Sheet 2 = Others."""
+    from database import get_authorized_capital_list, get_general_announcements
+    from agents.reporter_agent import generate_segregated_excel
+
+    auth_anns = await get_authorized_capital_list(limit=limit)
+    general_anns = await get_general_announcements(limit=limit)
+
+    excel_bytes = generate_segregated_excel(auth_anns, general_anns)
+    filename = f"AlphaIntel_Segregated_{datetime.now().strftime('%d%m%Y_%H%M')}.xlsx"
+
+    return StreamingResponse(
+        io.BytesIO(excel_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
 
 @app.get("/api/excel/authorized-capital")
 async def download_authorized_capital_excel(
     limit: int = Query(500, ge=1, le=2000),
-    from_date: Optional[str] = Query(None),
-    to_date: Optional[str] = Query(None),
 ):
-    """Download Excel in the user's exact 'Increase in Authorized Capital' format."""
-    # Lenient query: match exact type OR keywords in subject/description
-    from database import db
-    from datetime import datetime, timedelta
+    """Download Excel with ONLY authorized capital announcements."""
+    from database import get_authorized_capital_list
     from agents.reporter_agent import generate_authorized_capital_excel
-    
-    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat() + "Z" # 7 days for Excel to find rare events
-    query = {
-        "processed": True,
-        "announcement_date": {"$gte": cutoff},
-        "$or": [
-            {"ai_data.announcement_type": "Increase in Authorized Capital"},
-            {"raw_subject": {"$regex": "authorized capital", "$options": "i"}},
-            {"raw_subject": {"$regex": "authorised capital", "$options": "i"}},
-            {"ai_data.key_details": {"$regex": "authorized capital", "$options": "i"}},
-            {"ai_data.key_details": {"$regex": "authorised capital", "$options": "i"}}
-        ]
-    }
-    
-    cursor = db.announcements.find(query).sort([("announcement_date", -1)]).limit(limit)
-    announcements = await cursor.to_list(length=limit)
+
+    announcements = await get_authorized_capital_list(limit=limit)
 
     excel_bytes = generate_authorized_capital_excel(announcements)
     filename = f"Authorized_Capital_{datetime.now().strftime('%d%m%Y')}.xlsx"
@@ -241,15 +298,13 @@ async def download_full_report(
     sentiment: Optional[str] = Query(None),
     impact: Optional[str] = Query(None),
 ):
-    """Download comprehensive multi-sheet Excel report."""
-    from database import get_announcements
+    """Download general announcements Excel report."""
+    from database import get_general_announcements
     from agents.reporter_agent import generate_full_report_excel
 
-    announcements = await get_announcements(
-        limit=limit,
-        exchange=exchange,
-        sentiment=sentiment,
-        impact=impact
+    announcements = await get_general_announcements(
+        limit=limit, exchange=exchange,
+        sentiment=sentiment, impact=impact
     )
 
     excel_bytes = generate_full_report_excel(announcements)
@@ -266,7 +321,7 @@ async def download_full_report(
 
 @app.get("/api/company/{ticker}")
 async def get_company_profile(ticker: str, limit: int = Query(20, ge=1, le=100)):
-    """Get all announcements for a company by ticker."""
+    """Get all announcements for a company by ticker (from both collections)."""
     from database import get_company_announcements
 
     announcements = await get_company_announcements(ticker, limit)
@@ -276,6 +331,7 @@ async def get_company_profile(ticker: str, limit: int = Query(20, ge=1, le=100))
         ai_data = ann.get("ai_data", {}) or {}
         results.append({
             "id": ann["_id"],
+            "category": ann.get("_category", "general"),
             "exchange": _safe(ann.get("exchange")),
             "company_name": _safe(ai_data.get("company_name") or ann.get("company_name")),
             "ticker": _safe(ann.get("ticker")),
@@ -283,12 +339,8 @@ async def get_company_profile(ticker: str, limit: int = Query(20, ge=1, le=100))
             "title": _safe(ai_data.get("title"), "ANNOUNCEMENT"),
             "description": _safe(ai_data.get("description") or ai_data.get("key_details")),
             "announcement_date": ann.get("announcement_date", ""),
-            "key_details": _safe(ai_data.get("key_details")),
             "sentiment": _safe(ai_data.get("sentiment"), "Neutral"),
-            "impact_level": _safe(ai_data.get("impact_level") or ai_data.get("impact"), "Low"),
             "impact": _safe(ai_data.get("impact") or ai_data.get("impact_level"), "Low"),
-            "board_approval": _safe(ai_data.get("board_approval")),
-            "meeting_date": _safe(ai_data.get("meeting_date")),
             "ai_insight": _safe(ai_data.get("ai_insight")),
             "trading_signal": _safe(ai_data.get("trading_signal")),
             "sector": _safe(ai_data.get("sector")),
@@ -301,10 +353,10 @@ async def get_company_profile(ticker: str, limit: int = Query(20, ge=1, le=100))
 
 @app.post("/api/trigger")
 async def trigger_pipeline(background_tasks: BackgroundTasks):
-    """Manually trigger the fetch pipeline (for testing)."""
+    """Manually trigger the fetch pipeline."""
     from scheduler import run_pipeline
     background_tasks.add_task(run_pipeline)
-    return {"message": "Pipeline triggered!", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    return {"message": "Segregated pipeline triggered!", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
 # ─── Announcement Types List ─────────────────────────────────────────────
@@ -315,10 +367,11 @@ async def get_announcement_types():
     return {
         "types": [
             "Financial Results", "Dividend", "Merger & Acquisition",
-            "Increase in Authorized Capital", "Board Meeting", "Order Win",
-            "Rights Issue", "Buyback", "Insider Trading", "AGM/EGM",
-            "Share Allotment", "Regulatory Filing", "Other"
-        ]
+            "Board Meeting", "Order Win", "Rights Issue", "Buyback",
+            "Insider Trading", "AGM/EGM", "Share Allotment",
+            "Regulatory Filing", "Other"
+        ],
+        "primary_type": "Increase in Authorized Capital"
     }
 
 

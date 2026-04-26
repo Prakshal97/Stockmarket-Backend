@@ -1,6 +1,8 @@
 """
-Reporter Agent — Generates styled Excel reports from processed announcements.
-Matches the exact format shown in the user's screenshot.
+Reporter Agent — Generates styled Excel reports with STRICT SEGREGATION.
+
+Sheet 1: Authorized Capital (15 columns — client spec)
+Sheet 2: Other Announcements (7 columns)
 """
 import io
 from datetime import datetime
@@ -8,17 +10,15 @@ from typing import List, Dict, Optional
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import (
-    PatternFill, Font, Alignment, Border, Side, GradientFill
+    PatternFill, Font, Alignment, Border, Side
 )
 from openpyxl.utils import get_column_letter
-from openpyxl.chart import BarChart, Reference
 
+
+# ── Market Data Helpers ───────────────────────────────────────────────────
 
 def _prefetch_market_data(announcements: List[Dict]) -> dict:
-    """
-    Pre-fetch live CMP & Market Cap for all unique tickers in the batch.
-    Returns a dict: {clean_ticker: {'cmp': float|None, 'market_cap_cr': float|None}}
-    """
+    """Pre-fetch live CMP & Market Cap for all unique tickers."""
     try:
         from agents.market_data import batch_get_market_data, _clean_ticker
         tickers = []
@@ -36,14 +36,13 @@ def _prefetch_market_data(announcements: List[Dict]) -> dict:
 
 
 def _resolve_cmp(ai_data: dict, mkt_cache: dict) -> str:
-    """Return CMP as formatted string from DB value or live fetch."""
+    """Return CMP as formatted string."""
     val = ai_data.get("cmp")
     if val is not None:
         try:
             return f"₹{float(val):,.2f}"
         except:
             return str(val)
-    # Try live cache
     ticker = ai_data.get("ticker", "")
     if ticker:
         try:
@@ -59,14 +58,13 @@ def _resolve_cmp(ai_data: dict, mkt_cache: dict) -> str:
 
 
 def _resolve_market_cap(ai_data: dict, mkt_cache: dict) -> str:
-    """Return Market Cap as formatted string from DB value or live fetch."""
+    """Return Market Cap as formatted string."""
     val = ai_data.get("market_cap_cr")
     if val is not None:
         try:
             return f"₹{float(val):,.2f} Cr"
         except:
             return str(val)
-    # Try live cache
     ticker = ai_data.get("ticker", "")
     if ticker:
         try:
@@ -81,19 +79,19 @@ def _resolve_market_cap(ai_data: dict, mkt_cache: dict) -> str:
     return "Unavailable"
 
 
-# Color palette
+# ── Color Palette ─────────────────────────────────────────────────────────
+
 COLORS = {
-    "header_bg": "1E3A5F",       # Deep navy
+    "header_bg": "1E3A5F",
     "header_font": "FFFFFF",
-    "title_bg": "0D1B2A",        # Darker navy for title
-    "positive_bg": "D5F5E3",     # Light green
-    "negative_bg": "FADBD8",     # Light red
-    "neutral_bg": "FEF9E7",      # Light yellow
-    "high_impact": "E74C3C",     # Red
-    "medium_impact": "F39C12",   # Orange
-    "low_impact": "27AE60",      # Green
-    "alt_row": "EBF5FB",         # Light blue alternate row
-    "border": "BDC3C7",          # Light gray border
+    "title_bg": "0D1B2A",
+    "positive_bg": "D5F5E3",
+    "negative_bg": "FADBD8",
+    "neutral_bg": "FEF9E7",
+    "alt_row": "EBF5FB",
+    "border": "BDC3C7",
+    "auth_title_bg": "1B4332",
+    "general_title_bg": "1E3A5F",
 }
 
 THIN_BORDER = Border(
@@ -105,7 +103,7 @@ THIN_BORDER = Border(
 
 
 def _fmt_currency(val) -> str:
-    """Format INR value: 1,00,00,000 → '₹1 Crore' or '₹1,000 Cr'."""
+    """Format INR value."""
     if val is None:
         return "Unavailable"
     try:
@@ -121,37 +119,78 @@ def _fmt_currency(val) -> str:
         return str(val) if val else "Unavailable"
 
 
-def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
-    """
-    Generate Excel matching the user's 'Increase in Authorized Capital' format.
+# ══════════════════════════════════════════════════════════════════════════
+# MAIN EXPORT: Segregated Report (Sheet 1: Auth Cap, Sheet 2: Others)
+# ══════════════════════════════════════════════════════════════════════════
 
-    Columns:
-    Sr.no | Date of Entry | Name of the Company | Board Approval |
-    D O B M | Exist Auth Eq Cap (INR) | New Auth Eq Cap (INR) |
-    Proposed Increase (INR) | CMP | M cap (In Cr) | Sector
+def generate_segregated_excel(auth_announcements: List[Dict], general_announcements: List[Dict]) -> bytes:
     """
-    # Pre-fetch live market data for all tickers at once
+    Generate a dual-section Excel report.
+    Sheet 1: Authorized Capital (15 columns, client spec)
+    Sheet 2: Other Announcements (7 columns)
+    """
+    all_anns = auth_announcements + general_announcements
+    mkt_cache = _prefetch_market_data(all_anns)
+
+    wb = Workbook()
+
+    # ── Sheet 1: Authorized Capital ───────────────────────────────
+    ws1 = wb.active
+    ws1.title = "Authorized Capital"
+    _write_auth_capital_sheet(ws1, auth_announcements, mkt_cache)
+
+    # ── Sheet 2: Other Announcements ──────────────────────────────
+    ws2 = wb.create_sheet("Other Announcements")
+    _write_general_sheet(ws2, general_announcements)
+
+    return _save_workbook_bytes(wb)
+
+
+def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
+    """Generate Excel with ONLY authorized capital data (backward compat)."""
     mkt_cache = _prefetch_market_data(announcements)
     wb = Workbook()
     ws = wb.active
     ws.title = "Authorized Capital"
+    _write_auth_capital_sheet(ws, announcements, mkt_cache)
+    return _save_workbook_bytes(wb)
 
-    # ── Title Row ──────────────────────────────────────────────────────
-    ws.merge_cells("A1:K1")
+
+def generate_full_report_excel(announcements: List[Dict]) -> bytes:
+    """Legacy: Generate report from mixed announcements (backward compat)."""
+    mkt_cache = _prefetch_market_data(announcements)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Full AI Report"
+    _write_general_sheet(ws, announcements)
+    return _save_workbook_bytes(wb)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Sheet Writers
+# ══════════════════════════════════════════════════════════════════════════
+
+def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
+    """
+    Write Authorized Capital sheet with the exact 15 columns.
+    """
+    # ── Title ─────────────────────────────────────────────────────
+    ws.merge_cells("A1:O1")
     title_cell = ws["A1"]
-    title_cell.value = "Increase in Authorized Capital"
+    title_cell.value = f"SECTION 1: AUTHORIZED CAPITAL — {datetime.now().strftime('%d %B %Y')}"
     title_cell.font = Font(name="Calibri", bold=True, size=14, color=COLORS["header_font"])
-    title_cell.fill = PatternFill("solid", fgColor=COLORS["title_bg"])
+    title_cell.fill = PatternFill("solid", fgColor=COLORS["auth_title_bg"])
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[1].height = 30
 
-    # ── Header Row ─────────────────────────────────────────────────────
+    # ── Headers (15 columns) ──────────────────────────────────────
     headers = [
-        "Sr.no", "Date of Entry", "Name of the Company", "Board Approval",
-        "D O B M", "Exist Auth Eq Cap ( INR )", "New Auth Eq Cap (INR)",
-        "Proposed Increase ( INR )", "CMP", "M cap (In Cr)", "Sector"
+        "Sr. No", "Date of Entry", "Name of the Company", "Board Approval",
+        "D.O.B.M", "Existing Auth Eq Capital (INR)", "New Auth Eq Capital (INR)",
+        "Proposed Increase (INR)", "CMP", "Market Cap (in Cr)", "Sector",
+        "Remark Positive", "Remark Negative", "Action", "Link"
     ]
-    col_widths = [7, 15, 30, 15, 15, 25, 22, 22, 10, 16, 20]
+    col_widths = [7, 15, 32, 15, 15, 26, 24, 24, 14, 18, 20, 40, 40, 22, 15]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=2, column=col_idx, value=header)
@@ -160,126 +199,151 @@ def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = THIN_BORDER
         ws.column_dimensions[get_column_letter(col_idx)].width = width
+    ws.row_dimensions[2].height = 32
 
-    ws.row_dimensions[2].height = 30
+    # ── Data Rows ─────────────────────────────────────────────────
+    if not announcements:
+        ws.merge_cells("A3:O3")
+        cell = ws["A3"]
+        cell.value = "No Authorized Capital announcements found in the last 24 hours."
+        cell.font = Font(name="Calibri", size=11, italic=True, color="888888")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[3].height = 30
+        ws.freeze_panes = "A3"
+        return
 
-    # ── Data Rows ──────────────────────────────────────────────────────
-    row_num = 3
-    sr_no = 1
-
-    for ann in announcements:
+    for sr_no, ann in enumerate(announcements, 1):
         ai_data = ann.get("ai_data", {}) or {}
         auth_cap = ai_data.get("authorized_capital", {}) or {}
+        # Also check top-level auth_data (set by deterministic extractor)
+        auth_data_top = ann.get("auth_data", {}) or {}
 
-        # Parse date
+        # Merge: deterministic wins
+        merged_auth = {**auth_cap}
+        for key, val in auth_data_top.items():
+            if val is not None and val != "Not Available":
+                merged_auth[key] = val
+
+        # Date
         try:
             ann_date = datetime.fromisoformat(ann.get("announcement_date", "")).strftime("%d.%m.%Y")
         except:
             ann_date = ""
 
+        # Master data fallback for existing capital
         ticker = (ai_data.get("ticker") or ann.get("ticker", "")).upper()
-        existing_cap = auth_cap.get("existing_auth_eq_cap_inr")
+        existing_cap = merged_auth.get("existing_auth_eq_cap_inr")
         if not existing_cap:
             try:
-                import json
-                import os
-                master_path = os.path.join(os.path.dirname(__file__), "master_data.json")
+                import json, os
+                master_path = os.path.join(os.path.dirname(__file__), "agents", "master_data.json")
                 if os.path.exists(master_path):
                     with open(master_path, "r") as f:
-                        master_data = json.load(f)
-                    if ticker in master_data:
-                        existing_cap = master_data[ticker].get("existing_auth_cap")
+                        master = json.load(f)
+                    if ticker in master:
+                        existing_cap = master[ticker].get("existing_auth_cap")
             except:
                 pass
-        
+
+        sentiment = ai_data.get("sentiment", "Neutral")
+        insight = ai_data.get("ai_insight") or ai_data.get("key_details", "")
+
         row_data = [
             sr_no,
             ann_date,
             ai_data.get("company_name") or ann.get("company_name", ""),
-            auth_cap.get("board_approval", ""),
-            auth_cap.get("date_of_board_meeting", ""),
+            merged_auth.get("board_approval", "Not Available"),
+            merged_auth.get("date_of_board_meeting", "Not Available"),
             _fmt_currency(existing_cap),
-            _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
-            _fmt_currency(auth_cap.get("proposed_increase_inr")),
+            _fmt_currency(merged_auth.get("new_auth_eq_cap_inr")),
+            _fmt_currency(merged_auth.get("proposed_increase_inr")),
             _resolve_cmp(ai_data, mkt_cache),
             _resolve_market_cap(ai_data, mkt_cache),
-            ai_data.get("sector", ""),
+            ai_data.get("sector", "General"),
+            insight if sentiment in ["Positive", "Neutral"] else "",
+            insight if sentiment == "Negative" else "",
+            ai_data.get("trading_signal", ""),
+            ann.get("source_url", ""),
         ]
 
+        row = sr_no + 2
         is_alt = (sr_no % 2 == 0)
-        alt_fill = PatternFill("solid", fgColor=COLORS["alt_row"]) if is_alt else None
+
+        # Row fill based on sentiment
+        if sentiment == "Positive":
+            row_fill = PatternFill("solid", fgColor=COLORS["positive_bg"])
+        elif sentiment == "Negative":
+            row_fill = PatternFill("solid", fgColor=COLORS["negative_bg"])
+        elif is_alt:
+            row_fill = PatternFill("solid", fgColor=COLORS["alt_row"])
+        else:
+            row_fill = None
 
         for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_num, column=col_idx, value=value)
-            cell.font = Font(name="Calibri", size=10)
+            cell = ws.cell(row=row, column=col_idx, value=value)
+            cell.font = Font(name="Calibri", size=9)
             cell.border = THIN_BORDER
-            cell.alignment = Alignment(horizontal="center" if col_idx != 3 else "left",
-                                       vertical="center", wrap_text=True)
-            if alt_fill:
-                cell.fill = alt_fill
+            # Align text blocks left, others center
+            if col_idx in [3, 12, 13]:
+                align = "left"
+            else:
+                align = "center"
+            cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
+            if row_fill:
+                cell.fill = row_fill
+            # Color-code Action cell
+            if col_idx == 14:
+                if sentiment == "Positive":
+                    cell.font = Font(name="Calibri", size=9, bold=True, color="1E8449")
+                elif sentiment == "Negative":
+                    cell.font = Font(name="Calibri", size=9, bold=True, color="C0392B")
 
-        ws.row_dimensions[row_num].height = 20
-        row_num += 1
-        sr_no += 1
+        ws.row_dimensions[row].height = 40
 
-    # Freeze header rows
     ws.freeze_panes = "A3"
 
-    return _save_workbook_bytes(wb)
 
-
-def generate_full_report_excel(announcements: List[Dict]) -> bytes:
+def _write_general_sheet(ws, announcements: List[Dict]):
     """
-    Generate a comprehensive Excel report with the exact fields requested by the user.
+    Write Other Announcements sheet with 7 columns.
     """
-    # Pre-fetch live market data for all tickers at once
-    mkt_cache = _prefetch_market_data(announcements)
+    # ── Title ─────────────────────────────────────────────────────
+    ws.merge_cells("A1:G1")
+    title_cell = ws["A1"]
+    title_cell.value = f"SECTION 2: OTHER ANNOUNCEMENTS — {datetime.now().strftime('%d %B %Y')}"
+    title_cell.font = Font(name="Calibri", bold=True, size=14, color=COLORS["header_font"])
+    title_cell.fill = PatternFill("solid", fgColor=COLORS["general_title_bg"])
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Full AI Report"
-
-    _create_all_announcements_sheet(ws, announcements, mkt_cache)
-
-    return _save_workbook_bytes(wb)
-
-
-def _create_all_announcements_sheet(ws, announcements: List[Dict], mkt_cache: dict = None):
-    """Create the unified announcements sheet."""
-    if mkt_cache is None:
-        mkt_cache = {}
-    # Title
-    ws.merge_cells("A1:O1")
-    title = ws["A1"]
-    title.value = f"NSE/BSE Corporate Intelligence Report — {datetime.now().strftime('%d %B %Y')}"
-    title.font = Font(name="Calibri", bold=True, size=13, color="FFFFFF")
-    title.fill = PatternFill("solid", fgColor=COLORS["title_bg"])
-    title.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 26
-
+    # ── Headers (7 columns) ───────────────────────────────────────
     headers = [
-        "Sr. No", "Date of Entry", "Name of the Company", "Board Approval",
-        "D.O.B.M (Date of Board Meeting)", "Existing Authorized Equity Capital (INR)",
-        "New Authorized Equity Capital (INR)", "Proposed Increase (INR)",
-        "CMP (Current Market Price)", "Market Cap (in Cr)", "Sector",
-        "Remark Positive", "Remark Negative", "Action", "Link"
+        "Company", "Date", "Category", "Sentiment", "Impact", "Summary", "Source"
     ]
-    
-    col_widths = [7, 15, 30, 15, 15, 25, 22, 22, 15, 18, 20, 45, 45, 20, 15]
+    col_widths = [32, 15, 24, 12, 12, 55, 15]
 
-    for col_idx, (h, w) in enumerate(zip(headers, col_widths), 1):
-        cell = ws.cell(row=2, column=col_idx, value=h)
-        cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+    for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
+        cell = ws.cell(row=2, column=col_idx, value=header)
+        cell.font = Font(name="Calibri", bold=True, size=10, color=COLORS["header_font"])
         cell.fill = PatternFill("solid", fgColor=COLORS["header_bg"])
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = THIN_BORDER
-        ws.column_dimensions[get_column_letter(col_idx)].width = w
-
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
     ws.row_dimensions[2].height = 30
+
+    # ── Data Rows ─────────────────────────────────────────────────
+    if not announcements:
+        ws.merge_cells("A3:G3")
+        cell = ws["A3"]
+        cell.value = "No other announcements found."
+        cell.font = Font(name="Calibri", size=11, italic=True, color="888888")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[3].height = 30
+        ws.freeze_panes = "A3"
+        return
 
     for sr_no, ann in enumerate(announcements, 1):
         ai_data = ann.get("ai_data", {}) or {}
-        auth_cap = ai_data.get("authorized_capital", {}) or {}
         row = sr_no + 2
 
         try:
@@ -288,229 +352,43 @@ def _create_all_announcements_sheet(ws, announcements: List[Dict], mkt_cache: di
             ann_date = ""
 
         sentiment = ai_data.get("sentiment", "Neutral")
-        insight = ai_data.get("ai_insight") or ai_data.get("key_details", "")
-        
-        remark_positive = insight if sentiment in ["Positive", "Neutral"] else ""
-        remark_negative = insight if sentiment == "Negative" else ""
+        summary = ai_data.get("description") or ai_data.get("key_details") or ann.get("raw_subject", "")
 
-        # Row fill based on sentiment
+        row_data = [
+            ai_data.get("company_name") or ann.get("company_name", ""),
+            ann_date,
+            ai_data.get("announcement_type", "Other"),
+            sentiment,
+            ai_data.get("impact_level") or ai_data.get("impact", "Low"),
+            summary,
+            ann.get("source_url", ""),
+        ]
+
+        is_alt = (sr_no % 2 == 0)
         if sentiment == "Positive":
             row_fill = PatternFill("solid", fgColor=COLORS["positive_bg"])
         elif sentiment == "Negative":
             row_fill = PatternFill("solid", fgColor=COLORS["negative_bg"])
+        elif is_alt:
+            row_fill = PatternFill("solid", fgColor=COLORS["alt_row"])
         else:
-            row_fill = PatternFill("solid", fgColor=COLORS["neutral_bg"]) if sr_no % 2 == 0 else None
-
-        ticker = (ai_data.get("ticker") or ann.get("ticker", "")).upper()
-        existing_cap = auth_cap.get("existing_auth_eq_cap_inr")
-        if not existing_cap:
-            try:
-                import json
-                import os
-                master_path = os.path.join(os.path.dirname(__file__), "master_data.json")
-                if os.path.exists(master_path):
-                    with open(master_path, "r") as f:
-                        master_data = json.load(f)
-                    if ticker in master_data:
-                        existing_cap = master_data[ticker].get("existing_auth_cap")
-            except:
-                pass
-        
-        row_data = [
-            sr_no,
-            ann_date,
-            ai_data.get("company_name") or ann.get("company_name", ""),
-            auth_cap.get("board_approval") or ai_data.get("board_approval") or "Not Available",
-            auth_cap.get("date_of_board_meeting") or ai_data.get("meeting_date") or "Not Available",
-            _fmt_currency(existing_cap),
-            _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
-            _fmt_currency(auth_cap.get("proposed_increase_inr")),
-            _resolve_cmp(ai_data, mkt_cache),
-            _resolve_market_cap(ai_data, mkt_cache),
-            ai_data.get("sector") or "General",
-            remark_positive,
-            remark_negative,
-            ai_data.get("trading_signal", ""),
-            ann.get("source_url", ""),
-        ]
-
-        for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row, column=col_idx, value=value)
-            cell.font = Font(name="Calibri", size=9)
-            cell.border = THIN_BORDER
-            
-            # Align text blocks to left, numbers/dates to center
-            if col_idx in [3, 12, 13]:
-                align = "left"
-            else:
-                align = "center"
-                
-            cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
-            
-            if row_fill:
-                cell.fill = row_fill
-
-            # Color-code Action cell
-            if col_idx == 14:
-                if sentiment == "Positive":
-                    cell.font = Font(name="Calibri", size=9, bold=True, color="1E8449")
-                elif sentiment == "Negative":
-                    cell.font = Font(name="Calibri", size=9, bold=True, color="C0392B")
-
-        ws.row_dimensions[row].height = 45
-
-    ws.freeze_panes = "A3"
-
-
-def _create_authorized_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict = None):
-    """Mirror of the user's exact Excel format."""
-    if mkt_cache is None:
-        mkt_cache = {}
-    ws.merge_cells("A1:K1")
-    title_cell = ws["A1"]
-    title_cell.value = "Increase in Authorized Capital"
-    title_cell.font = Font(name="Calibri", bold=True, size=14, color=COLORS["header_font"])
-    title_cell.fill = PatternFill("solid", fgColor=COLORS["title_bg"])
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 28
-
-    headers = [
-        "Sr.no", "Date of Entry", "Name of the Company", "Board Approval",
-        "D O B M", "Exist Auth Eq Cap ( INR )", "New Auth Eq Cap (INR)",
-        "Proposed Increase ( INR )", "CMP", "M cap (In Cr)", "Sector"
-    ]
-    col_widths = [7, 15, 30, 15, 15, 25, 22, 22, 10, 16, 20]
-
-    for col_idx, (h, w) in enumerate(zip(headers, col_widths), 1):
-        cell = ws.cell(row=2, column=col_idx, value=h)
-        cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor=COLORS["header_bg"])
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = THIN_BORDER
-        ws.column_dimensions[get_column_letter(col_idx)].width = w
-
-    ws.row_dimensions[2].height = 30
-
-    for sr_no, ann in enumerate(announcements, 1):
-        ai_data = ann.get("ai_data", {}) or {}
-        auth_cap = ai_data.get("authorized_capital", {}) or {}
-
-        try:
-            ann_date = datetime.fromisoformat(ann.get("announcement_date", "")).strftime("%d.%m.%Y")
-        except:
-            ann_date = ""
-
-        ticker = (ai_data.get("ticker") or ann.get("ticker", "")).upper()
-        existing_cap = auth_cap.get("existing_auth_eq_cap_inr")
-        if not existing_cap:
-            try:
-                import json
-                import os
-                master_path = os.path.join(os.path.dirname(__file__), "master_data.json")
-                if os.path.exists(master_path):
-                    with open(master_path, "r") as f:
-                        master_data = json.load(f)
-                    if ticker in master_data:
-                        existing_cap = master_data[ticker].get("existing_auth_cap")
-            except:
-                pass
-        
-        row_data = [
-            sr_no,
-            ann_date,
-            ai_data.get("company_name") or ann.get("company_name", ""),
-            auth_cap.get("board_approval", ""),
-            auth_cap.get("date_of_board_meeting", ""),
-            _fmt_currency(existing_cap),
-            _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
-            _fmt_currency(auth_cap.get("proposed_increase_inr")),
-            _resolve_cmp(ai_data, mkt_cache),
-            _resolve_market_cap(ai_data, mkt_cache),
-            ai_data.get("sector", ""),
-        ]
-
-        is_alt = (sr_no % 2 == 0)
-        alt_fill = PatternFill("solid", fgColor=COLORS["alt_row"]) if is_alt else None
-        row = sr_no + 2
+            row_fill = None
 
         for col_idx, value in enumerate(row_data, 1):
             cell = ws.cell(row=row, column=col_idx, value=value)
             cell.font = Font(name="Calibri", size=10)
             cell.border = THIN_BORDER
-            cell.alignment = Alignment(
-                horizontal="left" if col_idx == 3 else "center",
-                vertical="center"
-            )
-            if alt_fill:
-                cell.fill = alt_fill
+            if col_idx in [1, 6]:
+                align = "left"
+            else:
+                align = "center"
+            cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
+            if row_fill:
+                cell.fill = row_fill
 
-        ws.row_dimensions[row].height = 20
+        ws.row_dimensions[row].height = 35
 
     ws.freeze_panes = "A3"
-
-
-def _create_summary_sheet(ws, announcements: List[Dict]):
-    """Create a statistics summary sheet."""
-    ws.merge_cells("A1:D1")
-    ws["A1"].value = "📊 Announcement Intelligence Summary"
-    ws["A1"].font = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
-    ws["A1"].fill = PatternFill("solid", fgColor=COLORS["title_bg"])
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 30
-
-    total = len(announcements)
-    processed = [a for a in announcements if a.get("ai_data")]
-
-    # Count by type
-    type_counts = {}
-    sentiment_counts = {"Positive": 0, "Neutral": 0, "Negative": 0}
-    impact_counts = {"High": 0, "Medium": 0, "Low": 0}
-    exchange_counts = {"NSE": 0, "BSE": 0}
-
-    for ann in processed:
-        ai = ann.get("ai_data", {})
-        t = ai.get("announcement_type", "Other")
-        type_counts[t] = type_counts.get(t, 0) + 1
-        s = ai.get("sentiment", "Neutral")
-        if s in sentiment_counts:
-            sentiment_counts[s] += 1
-        i = ai.get("impact_level", "Low")
-        if i in impact_counts:
-            impact_counts[i] += 1
-        e = ann.get("exchange", "NSE")
-        if e in exchange_counts:
-            exchange_counts[e] += 1
-
-    summary_data = [
-        ["Metric", "Value", "Category", "Count"],
-        ["Total Announcements", total, "By Sentiment", ""],
-        ["AI Processed", len(processed), "🟢 Positive", sentiment_counts["Positive"]],
-        ["NSE", exchange_counts["NSE"], "🟡 Neutral", sentiment_counts["Neutral"]],
-        ["BSE", exchange_counts["BSE"], "🔴 Negative", sentiment_counts["Negative"]],
-        ["", "", "By Impact", ""],
-        ["Type", "Count", "🔥 High", impact_counts["High"]],
-    ]
-
-    for t, c in sorted(type_counts.items(), key=lambda x: -x[1])[:5]:
-        summary_data.append([t, c, "", ""])
-
-    for row_idx, row_data in enumerate(summary_data, 2):
-        for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            if row_idx == 2:  # Sub-header
-                cell.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor=COLORS["header_bg"])
-            else:
-                cell.font = Font(name="Calibri", size=10)
-                if row_idx % 2 == 0:
-                    cell.fill = PatternFill("solid", fgColor=COLORS["alt_row"])
-            cell.border = THIN_BORDER
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 15
-    ws.column_dimensions["C"].width = 20
-    ws.column_dimensions["D"].width = 12
 
 
 def _save_workbook_bytes(wb: Workbook) -> bytes:
