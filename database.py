@@ -28,7 +28,7 @@ async def connect_db():
     await db.announcements.create_index("processed")
     # Compound index for faster feed queries (processed + date sort)
     await db.announcements.create_index([("processed", 1), ("announcement_date", -1)])
-    print("✅ Connected to MongoDB Atlas")
+    print("SUCCESS: Connected to MongoDB Atlas")
 
 
 async def close_db():
@@ -36,7 +36,7 @@ async def close_db():
     global client
     if client:
         client.close()
-        print("🔴 MongoDB connection closed")
+        print("INFO: MongoDB connection closed")
 
 
 async def upsert_announcement(announcement: dict) -> bool:
@@ -49,7 +49,7 @@ async def upsert_announcement(announcement: dict) -> bool:
         )
         return result.upserted_id is not None  # True if new
     except Exception as e:
-        print(f"❌ DB upsert error: {e}")
+        print(f"ERROR: DB upsert error: {e}")
         return False
 
 
@@ -71,7 +71,7 @@ async def update_announcement_ai(announcement_id: str, ai_data: dict, excel_row:
                 "processed": True,
                 "ai_data": ai_data,
                 "excel_row": excel_row,
-                "processed_at": datetime.utcnow().isoformat()
+                "processed_at": datetime.utcnow().isoformat() + "Z"
             }
         }
     )
@@ -88,7 +88,7 @@ async def get_announcements(
     search: Optional[str] = None
 ) -> List[dict]:
     """Fetch processed announcements with filters."""
-    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat() + "Z"
     query = {"processed": True, "announcement_date": {"$gte": cutoff}}
 
     if exchange:
@@ -117,7 +117,7 @@ async def get_announcements(
 
 async def get_stats() -> dict:
     """Aggregate stats for dashboard."""
-    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat() + "Z"
     pipeline = [
         {"$match": {"processed": True, "announcement_date": {"$gte": cutoff}}},
         {"$group": {
@@ -153,7 +153,7 @@ async def get_stats() -> dict:
 async def get_total_count(query: dict = None) -> int:
     """Count total documents matching query."""
     if query is None:
-        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat() + "Z"
         query = {"processed": True, "announcement_date": {"$gte": cutoff}}
     return await db.announcements.count_documents(query)
 
@@ -172,7 +172,7 @@ async def get_last_fetch_time() -> Optional[str]:
 
 async def get_company_announcements(ticker: str, limit: int = 20) -> List[dict]:
     """Get all announcements for a specific company within the last 24 hours."""
-    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat() + "Z"
     cursor = db.announcements.find(
         {
             "ticker": {"$regex": ticker, "$options": "i"}, 

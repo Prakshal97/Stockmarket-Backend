@@ -18,11 +18,11 @@ if GROQ_API_KEY:
     try:
         from groq import Groq
         groq_client = Groq(api_key=GROQ_API_KEY)
-        print("✅ Groq AI client initialized (llama3-70b-8192)")
+        print("SUCCESS: Groq AI client initialized (llama3-70b-8192)")
     except ImportError:
-        print("⚠️ Groq package not installed — run: pip install groq")
+        print("WARNING: Groq package not installed — run: pip install groq")
     except Exception as e:
-        print(f"⚠️ Groq init error: {e}")
+        print(f"WARNING: Groq init error: {e}")
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
@@ -65,14 +65,16 @@ You MUST return ONLY a valid JSON object with these exact keys. No markdown, no 
 }}
 
 RULES:
-- For "Increase in Authorized Capital" type: ALWAYS fill the authorized_capital object carefully
-- authorized_capital figures should be in INR (raw rupees, not crores)
-- Return ONLY valid JSON, no explanation, no markdown
-- If data is unavailable, use "Not Available" for strings and null for numbers
-- Impact: HIGH = major financial event, deal >500Cr, quarterly results; MEDIUM = moderate events; LOW = routine filings
-- Sentiment: POSITIVE = good news for stock, NEGATIVE = bad news, NEUTRAL = informational
-- title should be SHORT: e.g. "BUYBACK", "Q4 RESULTS", "DIVIDEND", "ORDER WIN"
-- board_approval and meeting_date MUST always be present (use "Not Available" if unknown)
+- For "Increase in Authorized Capital" type: ALWAYS fill the authorized_capital object carefully.
+- LOOK FOR: Existing Capital, New Capital, and Proposed Increase in the text.
+- authorized_capital figures should be in INR (raw rupees, NOT crores). If the text says "Rs 100 Crore", return 1000000000.
+- Return ONLY valid JSON, no explanation, no markdown.
+- If data is unavailable, use "Not Available" for strings and null for numbers.
+- Impact: HIGH = major financial event, deal >500Cr, quarterly results; MEDIUM = moderate events; LOW = routine filings.
+- Sentiment: POSITIVE = good news for stock, NEGATIVE = bad news, NEUTRAL = informational.
+- title should be SHORT: e.g. "BUYBACK", "Q4 RESULTS", "DIVIDEND", "ORDER WIN", "AUTH CAPITAL".
+- board_approval and meeting_date MUST always be present (use "Not Available" if unknown).
+- IF THE SUBJECT MENTIONS "AUTHORIZED CAPITAL" OR "AUTHORISED CAPITAL", SET announcement_type TO "Increase in Authorized Capital".
 """
 
 
@@ -124,7 +126,7 @@ def extract_announcement(announcement: dict) -> Optional[dict]:
     Returns the ai_data dict or None on failure.
     """
     if not groq_client:
-        print("⚠️ Groq not configured — using mock extraction")
+        print("WARNING: Groq not configured — using mock extraction")
         return _mock_extraction(announcement)
 
     try:
@@ -176,15 +178,15 @@ def extract_announcement(announcement: dict) -> Optional[dict]:
         if not ai_data.get("announcement_type") or ai_data["announcement_type"] == "Not Available":
             ai_data["announcement_type"] = "Other"
 
-        print(f"✅ Groq extracted: {ai_data.get('company_name')} — {ai_data.get('title')} ({ai_data.get('sentiment')})")
+        print(f"SUCCESS: Groq extracted: {ai_data.get('company_name')} — {ai_data.get('title')} ({ai_data.get('sentiment')})")
         return ai_data
 
     except json.JSONDecodeError as e:
-        print(f"❌ JSON parse error for {announcement.get('company_name')}: {e}")
+        print(f"ERROR: JSON parse error for {announcement.get('company_name')}: {e}")
         return _mock_extraction(announcement)
     except Exception as e:
         if "decommissioned" in str(e).lower() or "not found" in str(e).lower():
-            print(f"⚠️ Groq model {GROQ_MODEL} failed. Switching to llama-3.1-8b-instant...")
+            print(f"WARNING: Groq model {GROQ_MODEL} failed. Switching to llama-3.1-8b-instant...")
             # Retry with fallback model
             response = groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
@@ -206,10 +208,10 @@ def extract_announcement(announcement: dict) -> Optional[dict]:
             ai_data = _sanitize_ai_data(ai_data)
             if not ai_data.get("announcement_type") or ai_data["announcement_type"] == "Not Available":
                 ai_data["announcement_type"] = "Other"
-            print(f"✅ Groq fallback extracted: {ai_data.get('company_name')} — {ai_data.get('title')} ({ai_data.get('sentiment')})")
+            print(f"SUCCESS: Groq fallback extracted: {ai_data.get('company_name')} — {ai_data.get('title')} ({ai_data.get('sentiment')})")
             return ai_data
             
-        print(f"❌ Groq extraction error for {announcement.get('company_name')}: {e}")
+        print(f"ERROR: Groq extraction error for {announcement.get('company_name')}: {e}")
         return _mock_extraction(announcement)
 
 
@@ -224,7 +226,7 @@ def _mock_extraction(announcement: dict) -> dict:
     company_name = announcement.get("company_name", "Unknown Company")
 
     # Determine type & title
-    if any(k in text for k in ["authorized capital", "authorised capital", "increase in capital"]):
+    if any(k in text for k in ["authorized capital", "authorised capital", "authorized share capital", "authorised share capital", "increase in capital"]):
         ann_type = "Increase in Authorized Capital"
         title = "AUTHORIZED CAPITAL"
     elif any(k in text for k in ["financial results", "quarterly results", "q4", "q3", "q2", "q1", "annual results"]):

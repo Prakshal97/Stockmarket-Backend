@@ -72,7 +72,7 @@ async def home():
 async def health():
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
         "service": "NSE/BSE Financial Intelligence Agent",
         "ai_engine": "Groq (LLaMA 3 70B)"
     }
@@ -193,13 +193,26 @@ async def download_authorized_capital_excel(
     to_date: Optional[str] = Query(None),
 ):
     """Download Excel in the user's exact 'Increase in Authorized Capital' format."""
-    from database import get_announcements
+    # Lenient query: match exact type OR keywords in subject/description
+    from database import db
+    from datetime import datetime, timedelta
     from agents.reporter_agent import generate_authorized_capital_excel
-
-    announcements = await get_announcements(
-        announcement_type="Increase in Authorized Capital",
-        limit=limit
-    )
+    
+    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat() + "Z" # 7 days for Excel to find rare events
+    query = {
+        "processed": True,
+        "announcement_date": {"$gte": cutoff},
+        "$or": [
+            {"ai_data.announcement_type": "Increase in Authorized Capital"},
+            {"raw_subject": {"$regex": "authorized capital", "$options": "i"}},
+            {"raw_subject": {"$regex": "authorised capital", "$options": "i"}},
+            {"ai_data.key_details": {"$regex": "authorized capital", "$options": "i"}},
+            {"ai_data.key_details": {"$regex": "authorised capital", "$options": "i"}}
+        ]
+    }
+    
+    cursor = db.announcements.find(query).sort([("announcement_date", -1)]).limit(limit)
+    announcements = await cursor.to_list(length=limit)
 
     excel_bytes = generate_authorized_capital_excel(announcements)
     filename = f"Authorized_Capital_{datetime.now().strftime('%d%m%Y')}.xlsx"
@@ -281,7 +294,7 @@ async def trigger_pipeline(background_tasks: BackgroundTasks):
     """Manually trigger the fetch pipeline (for testing)."""
     from scheduler import run_pipeline
     background_tasks.add_task(run_pipeline)
-    return {"message": "Pipeline triggered!", "timestamp": datetime.utcnow().isoformat()}
+    return {"message": "Pipeline triggered!", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
 
 # ─── Announcement Types List ─────────────────────────────────────────────

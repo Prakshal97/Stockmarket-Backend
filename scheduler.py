@@ -28,11 +28,11 @@ async def run_pipeline():
     from database import upsert_announcement, get_unprocessed_announcements, update_announcement_ai
 
     print(f"\n{'='*60}")
-    print(f"🤖 Pipeline started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"PIPELINE: Pipeline started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
     # Step 1: Fetch
-    raw_announcements = fetch_all_announcements()
+    raw_announcements = await asyncio.to_thread(fetch_all_announcements)
     new_count = 0
 
     # Step 2: Store raw announcements (dedup via MongoDB)
@@ -41,7 +41,7 @@ async def run_pipeline():
         if is_new:
             new_count += 1
 
-    print(f"📥 Stored {new_count} new announcements (out of {len(raw_announcements)} fetched)")
+    print(f"INFO: Stored {new_count} new announcements (out of {len(raw_announcements)} fetched)")
 
     # Step 3: Process unprocessed announcements with AI
     unprocessed = await get_unprocessed_announcements(limit=MAX_PROCESS)
@@ -49,8 +49,16 @@ async def run_pipeline():
 
     for ann in unprocessed:
         try:
+            # If PDF exists, extract its text to give the AI proper context
+            if ann.get("pdf_url") and len(ann.get("raw_body", "")) < 500:
+                from agents.scraper_agent import extract_pdf_text
+                print(f"INFO: Extracting PDF text for {ann.get('company_name')}...")
+                pdf_text = await asyncio.to_thread(extract_pdf_text, ann["pdf_url"])
+                if pdf_text:
+                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_text)[:5000]
+
             # AI Extraction
-            ai_data = extract_announcement(ann)
+            ai_data = await asyncio.to_thread(extract_announcement, ann)
             if not ai_data:
                 continue
 
@@ -65,20 +73,20 @@ async def run_pipeline():
             processed_count += 1
 
         except Exception as e:
-            print(f"❌ Error processing {ann.get('company_name')}: {e}")
+            print(f"ERROR: Error processing {ann.get('company_name')}: {e}")
 
-    last_run["time"] = datetime.utcnow().isoformat()
+    last_run["time"] = datetime.utcnow().isoformat() + "Z"
     last_run["count"] = processed_count
 
-    print(f"✅ Pipeline complete: {processed_count} announcements AI-processed")
+    print(f"SUCCESS: Pipeline complete: {processed_count} announcements AI-processed")
     
     # Step 4: Cleanup announcements older than 24 hours to enforce strict 24h limit
     try:
         from database import db
         import logging
-        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat() + "Z"
         del_result = await db.announcements.delete_many({"announcement_date": {"$lt": cutoff}})
-        print(f"🧹 Cleanup: Deleted {del_result.deleted_count} announcements older than 24 hours.")
+        print(f"CLEANUP: Deleted {del_result.deleted_count} announcements older than 24 hours.")
     except Exception as e:
         print(f"⚠️ Cleanup failed: {e}")
 

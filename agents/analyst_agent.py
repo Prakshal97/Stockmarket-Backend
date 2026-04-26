@@ -89,10 +89,22 @@ def enrich_announcement(announcement: dict, ai_data: dict) -> dict:
     elif rule_sentiment != ai_sentiment and rule_sentiment != "Neutral":
         pass  # Let AI decide
 
-    # Ensure authorized_capital is correct
-    if ai_data.get("announcement_type") == "Increase in Authorized Capital":
-        if not ai_data.get("authorized_capital"):
-            ai_data["authorized_capital"] = _extract_auth_capital_from_text(text)
+    # Ensure authorized_capital is correct if keywords are present
+    if "authorized capital" in text or "authorised capital" in text or "authorized share capital" in text or "authorised share capital" in text:
+        extracted_auth = _extract_auth_capital_from_text(text)
+        existing_auth = ai_data.get("authorized_capital") or {}
+        
+        merged_auth = {}
+        for key in ["board_approval", "date_of_board_meeting", "existing_auth_eq_cap_inr", "new_auth_eq_cap_inr", "proposed_increase_inr"]:
+            val = extracted_auth.get(key)
+            if val is None or val == "Not Available":
+                val = existing_auth.get(key)
+            merged_auth[key] = val
+            
+        # If we found actual amounts or if it's already this type, ensure the type is set correctly
+        if merged_auth.get("new_auth_eq_cap_inr") or ai_data.get("announcement_type") == "Increase in Authorized Capital":
+            ai_data["announcement_type"] = "Increase in Authorized Capital"
+            ai_data["authorized_capital"] = merged_auth
 
     # Add trading signals
     ai_data["trading_signal"] = _generate_trading_signal(ai_data)
@@ -162,17 +174,33 @@ def _extract_auth_capital_from_text(text: str) -> dict:
             auth_cap["date_of_board_meeting"] = match.group(1)
             break
 
-    # Crore amounts
-    crore_matches = re.findall(r'rs[.\s]*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:crore|cr)', text, re.IGNORECASE)
-    if len(crore_matches) >= 2:
+    # Crore amounts (e.g., Rs 100 Crore, 100 Cr, 100.50 Crores)
+    crore_matches = re.findall(r'(?:rs\.?|inr)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:crore|cr|cr\.)', text, re.IGNORECASE)
+    
+    # Direct Rupee amounts (e.g., 1,00,00,00,000)
+    direct_matches = re.findall(r'(?:rs\.?|inr)?\s*(\d{1,3}(?:,\d{2,3})+)', text)
+    
+    all_amounts = []
+    if crore_matches:
         try:
-            amounts = [float(m.replace(",", "")) * 1_00_00_000 for m in crore_matches[:3]]
-            amounts.sort()
-            auth_cap["existing_auth_eq_cap_inr"] = amounts[0]
-            auth_cap["new_auth_eq_cap_inr"] = amounts[-1]
-            auth_cap["proposed_increase_inr"] = amounts[-1] - amounts[0]
-        except:
-            pass
+            all_amounts.extend([float(m.replace(",", "")) * 1_00_00_000 for m in crore_matches])
+        except: pass
+    
+    if direct_matches:
+        try:
+            all_amounts.extend([float(m.replace(",", "")) for m in direct_matches])
+        except: pass
+
+    if len(all_amounts) >= 2:
+        all_amounts.sort()
+        # Assume smallest is existing, largest is new
+        auth_cap["existing_auth_eq_cap_inr"] = all_amounts[0]
+        auth_cap["new_auth_eq_cap_inr"] = all_amounts[-1]
+        auth_cap["proposed_increase_inr"] = all_amounts[-1] - all_amounts[0]
+    elif len(all_amounts) == 1:
+        # If only one amount, it's likely the new or increase
+        auth_cap["new_auth_eq_cap_inr"] = all_amounts[0]
+
 
     return auth_cap
 

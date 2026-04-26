@@ -80,12 +80,12 @@ def fetch_nse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                 # Parse announcement date
                 raw_date = item.get("an_dt") or item.get("date") or item.get("exchdisstime", "")
                 try:
-                    ann_date = datetime.strptime(raw_date[:10], "%d-%b-%Y") if raw_date else datetime.now()
+                    ann_date = datetime.strptime(raw_date[:10], "%d-%b-%Y") if raw_date else (datetime.utcnow() + timedelta(hours=5, minutes=30))
                 except:
                     try:
                         ann_date = datetime.strptime(raw_date[:10], "%Y-%m-%d")
                     except:
-                        ann_date = datetime.now()
+                        ann_date = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
                 symbol = item.get("symbol", "") or item.get("nsesymbol", "")
                 company = item.get("comp", "") or item.get("companyName", symbol)
@@ -103,8 +103,8 @@ def fetch_nse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                     "raw_body": item.get("body", ""),
                     "pdf_url": pdf_url,
                     "source_url": f"https://www.nseindia.com/companies-listing/corporate-filings-announcements",
-                    "announcement_date": ann_date.isoformat(),
-                    "fetched_at": datetime.utcnow().isoformat(),
+                    "announcement_date": ann_date.isoformat() + "+05:30",
+                    "fetched_at": datetime.utcnow().isoformat() + "Z",
                     "processed": False,
                     "announcement_id": _make_announcement_id("NSE", str(seq_no) + subject[:20]),
                 })
@@ -112,10 +112,10 @@ def fetch_nse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                 print(f"⚠️ NSE item parse error: {e}")
                 continue
 
-        print(f"✅ NSE: Fetched {len(announcements)} announcements")
+        print(f"SUCCESS: NSE: Fetched {len(announcements)} announcements")
 
     except Exception as e:
-        print(f"❌ NSE fetch failed: {e}")
+        print(f"ERROR: NSE fetch failed: {e}")
         # Return mock data for development/testing
         announcements = _get_mock_nse_announcements()
 
@@ -167,7 +167,7 @@ def fetch_bse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                 try:
                     ann_date = datetime.strptime(raw_date[:10], "%Y-%m-%d")
                 except:
-                    ann_date = datetime.now()
+                    ann_date = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
                 subject = item.get("NEWSSUB", "") or item.get("HEADLINE", "")
                 company = item.get("SLONGNAME", "") or item.get("COMPANYNAME", str(scrip_cd))
@@ -183,8 +183,8 @@ def fetch_bse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                     "raw_body": item.get("NEWSSUB", ""),
                     "pdf_url": pdf_url,
                     "source_url": f"https://www.bseindia.com/corporates/ann.html",
-                    "announcement_date": ann_date.isoformat(),
-                    "fetched_at": datetime.utcnow().isoformat(),
+                    "announcement_date": ann_date.isoformat() + "Z",
+                    "fetched_at": datetime.utcnow().isoformat() + "Z",
                     "processed": False,
                     "announcement_id": _make_announcement_id("BSE", str(news_id) + subject[:20]),
                 })
@@ -192,10 +192,10 @@ def fetch_bse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                 print(f"⚠️ BSE item parse error: {e}")
                 continue
 
-        print(f"✅ BSE: Fetched {len(announcements)} announcements")
+        print(f"SUCCESS: BSE: Fetched {len(announcements)} announcements")
 
     except Exception as e:
-        print(f"❌ BSE fetch failed: {e}")
+        print(f"ERROR: BSE fetch failed: {e}")
         announcements = _get_mock_bse_announcements()
 
     return announcements
@@ -224,12 +224,12 @@ def extract_pdf_text(pdf_url: str) -> Optional[str]:
 
 def fetch_all_announcements() -> List[Dict]:
     """Fetch from both NSE and BSE, combine results."""
-    print("🔄 Starting announcement fetch cycle...")
+    print("REFRESH: Starting announcement fetch cycle...")
     nse = fetch_nse_announcements()
     time.sleep(2)  # Polite delay
     bse = fetch_bse_announcements()
     all_announcements = nse + bse
-    print(f"📊 Total fetched: {len(all_announcements)} announcements")
+    print(f"STATS: Total fetched: {len(all_announcements)} announcements")
     return all_announcements
 
 
@@ -247,8 +247,8 @@ def _get_mock_nse_announcements() -> List[Dict]:
             "raw_body": "Reliance Industries Limited has declared financial results for Q4 FY2024. Revenue increased by 12% YoY to Rs 2,23,000 Cr. Net Profit stands at Rs 18,951 Cr, up 6% YoY. EBITDA margin improved to 17.2%. Board has recommended final dividend of Rs 9 per share.",
             "pdf_url": None,
             "source_url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("NSE", "RELIANCE_Q4FY24_RESULTS"),
         },
@@ -260,8 +260,8 @@ def _get_mock_nse_announcements() -> List[Dict]:
             "raw_body": "TCS Board approves increase in Authorized Share Capital from Rs 375 Crore to Rs 500 Crore. Board Meeting held on 05-Apr-2024. Resolution passed with requisite majority.",
             "pdf_url": None,
             "source_url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("NSE", "TCS_AUTH_CAP_2024"),
         },
@@ -273,8 +273,8 @@ def _get_mock_nse_announcements() -> List[Dict]:
             "raw_body": "HDFC Bank announces final dividend of Rs 19.50 per equity share of face value Rs 1 each for FY2024. Record date is 12-April-2024. Total outflow approximately Rs 14,800 Cr.",
             "pdf_url": None,
             "source_url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("NSE", "HDFCBANK_DIV_FY24"),
         },
@@ -286,8 +286,8 @@ def _get_mock_nse_announcements() -> List[Dict]:
             "raw_body": "Infosys has signed a $1.5 billion multi-year deal with a leading global retail chain for end-to-end IT transformation. The deal covers cloud migration, ERP modernization, and AI-driven analytics over 7 years.",
             "pdf_url": None,
             "source_url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("NSE", "INFY_ORDER_WIN_2024"),
         },
@@ -299,8 +299,8 @@ def _get_mock_nse_announcements() -> List[Dict]:
             "raw_body": "Adani Enterprises Board approves preferential issue of 1,00,00,000 equity shares at Rs 2850 per share to certain identified investors. Total fund raise of Rs 2850 Crore subject to shareholder approval.",
             "pdf_url": None,
             "source_url": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("NSE", "ADANIENT_PREF_2024"),
         },
@@ -319,8 +319,8 @@ def _get_mock_bse_announcements() -> List[Dict]:
             "raw_body": "Board of Directors approved increase in Authorized Share Capital from Rs 12,850 Crore to Rs 15,000 Crore. Board Meeting date: 03-Apr-2024. Subject to shareholders approval via postal ballot.",
             "pdf_url": None,
             "source_url": "https://www.bseindia.com/corporates/ann.html",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("BSE", "ONGC_AUTH_CAP_2024"),
         },
@@ -332,8 +332,8 @@ def _get_mock_bse_announcements() -> List[Dict]:
             "raw_body": "Wipro Board approves buyback of up to 26,96,08,470 equity shares at Rs 445 per share. Total buyback size Rs 12,000 Crore (approx 3.15% of total paid-up equity). Open Market route via Stock Exchange.",
             "pdf_url": None,
             "source_url": "https://www.bseindia.com/corporates/ann.html",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("BSE", "WIPRO_BUYBACK_2024"),
         },
@@ -345,8 +345,8 @@ def _get_mock_bse_announcements() -> List[Dict]:
             "raw_body": "Maruti Suzuki reports total sales of 1,85,899 units in March 2024, up 3.5% YoY. Exports stood at 23,956 units. Total FY2024 domestic sales cross 20 lakh units for first time in company history.",
             "pdf_url": None,
             "source_url": "https://www.bseindia.com/corporates/ann.html",
-            "announcement_date": now.isoformat(),
-            "fetched_at": now.isoformat(),
+            "announcement_date": (now + timedelta(hours=5, minutes=30)).isoformat() + "+05:30",
+            "fetched_at": now.isoformat() + "Z",
             "processed": False,
             "announcement_id": _make_announcement_id("BSE", "MARUTI_SALES_Q4FY24"),
         },

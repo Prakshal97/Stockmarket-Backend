@@ -146,59 +146,37 @@ def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
 
 def generate_full_report_excel(announcements: List[Dict]) -> bytes:
     """
-    Generate a comprehensive multi-sheet Excel with all announcement types.
-    Sheet 1: All Announcements
-    Sheet 2: Authorized Capital (user's format)
-    Sheet 3: High Impact Only
-    Sheet 4: Summary Stats
+    Generate a comprehensive Excel report with the exact fields requested by the user.
     """
     wb = Workbook()
+    ws = wb.active
+    ws.title = "Full AI Report"
 
-    # ─── Sheet 1: All Announcements ────────────────────────────────────
-    ws_all = wb.active
-    ws_all.title = "All Announcements"
-    _create_all_announcements_sheet(ws_all, announcements)
-
-    # ─── Sheet 2: Authorized Capital ───────────────────────────────────
-    auth_cap_anns = [a for a in announcements
-                     if a.get("ai_data", {}) and
-                     a["ai_data"].get("announcement_type") == "Increase in Authorized Capital"]
-    if auth_cap_anns:
-        ws_auth = wb.create_sheet("Authorized Capital")
-        _create_authorized_capital_sheet(ws_auth, auth_cap_anns)
-
-    # ─── Sheet 3: High Impact ──────────────────────────────────────────
-    high_impact = [a for a in announcements
-                   if a.get("ai_data", {}) and
-                   a["ai_data"].get("impact_level") == "High"]
-    if high_impact:
-        ws_high = wb.create_sheet("🔥 High Impact")
-        _create_all_announcements_sheet(ws_high, high_impact)
-
-    # ─── Sheet 4: Summary ─────────────────────────────────────────────
-    ws_summary = wb.create_sheet("Summary")
-    _create_summary_sheet(ws_summary, announcements)
+    _create_all_announcements_sheet(ws, announcements)
 
     return _save_workbook_bytes(wb)
 
 
 def _create_all_announcements_sheet(ws, announcements: List[Dict]):
-    """Create the main announcements sheet."""
+    """Create the unified announcements sheet."""
     # Title
-    ws.merge_cells("A1:L1")
+    ws.merge_cells("A1:O1")
     title = ws["A1"]
-    title.value = f"NSE/BSE Corporate Announcements — {datetime.now().strftime('%d %B %Y')}"
+    title.value = f"NSE/BSE Corporate Intelligence Report — {datetime.now().strftime('%d %B %Y')}"
     title.font = Font(name="Calibri", bold=True, size=13, color="FFFFFF")
     title.fill = PatternFill("solid", fgColor=COLORS["title_bg"])
     title.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 26
 
     headers = [
-        "Sr.no", "Date", "Exchange", "Company", "Type",
-        "Key Details", "Revenue/Profit Impact",
-        "Sentiment", "Impact", "AI Insight", "Trading Signal", "Source"
+        "Sr. No", "Date of Entry", "Name of the Company", "Board Approval",
+        "D.O.B.M (Date of Board Meeting)", "Existing Authorized Equity Capital (INR)",
+        "New Authorized Equity Capital (INR)", "Proposed Increase (INR)",
+        "CMP (Current Market Price)", "Market Cap (in Cr)", "Sector",
+        "Remark Positive", "Remark Negative", "Action", "Link"
     ]
-    col_widths = [7, 14, 10, 28, 22, 40, 25, 12, 10, 45, 20, 15]
+    
+    col_widths = [7, 15, 30, 15, 15, 25, 22, 22, 15, 18, 20, 45, 45, 20, 15]
 
     for col_idx, (h, w) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=2, column=col_idx, value=h)
@@ -212,15 +190,19 @@ def _create_all_announcements_sheet(ws, announcements: List[Dict]):
 
     for sr_no, ann in enumerate(announcements, 1):
         ai_data = ann.get("ai_data", {}) or {}
+        auth_cap = ai_data.get("authorized_capital", {}) or {}
         row = sr_no + 2
 
         try:
-            ann_date = datetime.fromisoformat(ann.get("announcement_date", "")).strftime("%d-%m-%Y")
+            ann_date = datetime.fromisoformat(ann.get("announcement_date", "")).strftime("%d.%m.%Y")
         except:
             ann_date = ""
 
         sentiment = ai_data.get("sentiment", "Neutral")
-        impact = ai_data.get("impact_level", "Low")
+        insight = ai_data.get("ai_insight") or ai_data.get("key_details", "")
+        
+        remark_positive = insight if sentiment in ["Positive", "Neutral"] else ""
+        remark_negative = insight if sentiment == "Negative" else ""
 
         # Row fill based on sentiment
         if sentiment == "Positive":
@@ -233,14 +215,17 @@ def _create_all_announcements_sheet(ws, announcements: List[Dict]):
         row_data = [
             sr_no,
             ann_date,
-            ann.get("exchange", ""),
             ai_data.get("company_name") or ann.get("company_name", ""),
-            ai_data.get("announcement_type", "Other"),
-            ai_data.get("key_details", ann.get("raw_subject", "")),
-            ai_data.get("revenue_profit_impact", ""),
-            sentiment,
-            impact,
-            ai_data.get("ai_insight", ""),
+            auth_cap.get("board_approval") or ai_data.get("board_approval", ""),
+            auth_cap.get("date_of_board_meeting") or ai_data.get("meeting_date", ""),
+            _fmt_currency(auth_cap.get("existing_auth_eq_cap_inr")),
+            _fmt_currency(auth_cap.get("new_auth_eq_cap_inr")),
+            _fmt_currency(auth_cap.get("proposed_increase_inr")),
+            ai_data.get("cmp", "Unavailable") or "Unavailable",
+            ai_data.get("market_cap_cr", "Unavailable") or "Unavailable",
+            ai_data.get("sector", ""),
+            remark_positive,
+            remark_negative,
             ai_data.get("trading_signal", ""),
             ann.get("source_url", ""),
         ]
@@ -249,31 +234,24 @@ def _create_all_announcements_sheet(ws, announcements: List[Dict]):
             cell = ws.cell(row=row, column=col_idx, value=value)
             cell.font = Font(name="Calibri", size=9)
             cell.border = THIN_BORDER
-            cell.alignment = Alignment(
-                horizontal="left" if col_idx in [4, 6, 7, 10] else "center",
-                vertical="center",
-                wrap_text=True
-            )
+            
+            # Align text blocks to left, numbers/dates to center
+            if col_idx in [3, 12, 13]:
+                align = "left"
+            else:
+                align = "center"
+                
+            cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
+            
             if row_fill:
                 cell.fill = row_fill
 
-            # Color-code sentiment cell
-            if col_idx == 8:  # Sentiment column
+            # Color-code Action cell
+            if col_idx == 14:
                 if sentiment == "Positive":
                     cell.font = Font(name="Calibri", size=9, bold=True, color="1E8449")
                 elif sentiment == "Negative":
                     cell.font = Font(name="Calibri", size=9, bold=True, color="C0392B")
-                else:
-                    cell.font = Font(name="Calibri", size=9, bold=True, color="D68910")
-
-            # Color-code impact cell
-            if col_idx == 9:  # Impact column
-                if impact == "High":
-                    cell.font = Font(name="Calibri", size=9, bold=True, color=COLORS["high_impact"])
-                elif impact == "Medium":
-                    cell.font = Font(name="Calibri", size=9, bold=True, color=COLORS["medium_impact"])
-                else:
-                    cell.font = Font(name="Calibri", size=9, bold=True, color=COLORS["low_impact"])
 
         ws.row_dimensions[row].height = 45
 
