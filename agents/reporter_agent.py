@@ -24,7 +24,7 @@ def _prefetch_market_data(announcements: List[Dict]) -> dict:
         tickers = []
         for ann in announcements:
             ai_data = ann.get("ai_data", {}) or {}
-            t = ai_data.get("ticker") or ann.get("ticker", "")
+            t = ai_data.get("ticker") or ann.get("ticker") or ann.get("symbol", "")
             if t:
                 tickers.append(t)
         if not tickers:
@@ -172,10 +172,10 @@ def generate_full_report_excel(announcements: List[Dict]) -> bytes:
 
 def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
     """
-    Write Authorized Capital sheet with the exact 15 columns.
+    Write Authorized Capital sheet with the exact 10 columns required by the client.
     """
     # ── Title ─────────────────────────────────────────────────────
-    ws.merge_cells("A1:O1")
+    ws.merge_cells("A1:J1")
     title_cell = ws["A1"]
     title_cell.value = f"SECTION 1: AUTHORIZED CAPITAL — {datetime.now().strftime('%d %B %Y')}"
     title_cell.font = Font(name="Calibri", bold=True, size=14, color=COLORS["header_font"])
@@ -185,12 +185,10 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
 
     # ── Headers (15 columns) ──────────────────────────────────────
     headers = [
-        "Sr. No", "Date of Entry", "Name of the Company", "Board Approval",
-        "D.O.B.M", "Existing Auth Eq Capital (INR)", "New Auth Eq Capital (INR)",
-        "Proposed Increase (INR)", "CMP", "Market Cap (in Cr)", "Sector",
-        "Remark Positive", "Remark Negative", "Action", "Link"
+        "Company", "Symbol", "Exchange", "Date", "Old Capital",
+        "New Capital", "Increase Amount", "% Increase", "Source URL", "PDF URL"
     ]
-    col_widths = [7, 15, 32, 15, 15, 26, 24, 24, 14, 18, 20, 40, 40, 22, 15]
+    col_widths = [30, 14, 12, 14, 18, 18, 18, 12, 28, 28]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=2, column=col_idx, value=header)
@@ -203,9 +201,9 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
 
     # ── Data Rows ─────────────────────────────────────────────────
     if not announcements:
-        ws.merge_cells("A3:O3")
+        ws.merge_cells("A3:J3")
         cell = ws["A3"]
-        cell.value = "No Authorized Capital announcements found in the last 24 hours."
+        cell.value = "No Authorized Capital announcements found in the last 48 hours."
         cell.font = Font(name="Calibri", size=11, italic=True, color="888888")
         cell.alignment = Alignment(horizontal="center", vertical="center")
         ws.row_dimensions[3].height = 30
@@ -215,90 +213,69 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
     for sr_no, ann in enumerate(announcements, 1):
         ai_data = ann.get("ai_data", {}) or {}
         auth_cap = ai_data.get("authorized_capital", {}) or {}
-        # Also check top-level auth_data (set by deterministic extractor)
         auth_data_top = ann.get("auth_data", {}) or {}
-
-        # Merge: deterministic wins
         merged_auth = {**auth_cap}
         for key, val in auth_data_top.items():
             if val is not None and val != "Not Available":
                 merged_auth[key] = val
 
-        # Date
         try:
             ann_date = datetime.fromisoformat(ann.get("announcement_date", "")).strftime("%d.%m.%Y")
         except:
             ann_date = ""
 
-        # Master data fallback for existing capital
-        ticker = (ai_data.get("ticker") or ann.get("ticker", "")).upper()
-        existing_cap = merged_auth.get("existing_auth_eq_cap_inr")
-        if not existing_cap:
+        old_cap = ann.get("old_capital_inr") or merged_auth.get("existing_auth_eq_cap_inr")
+        new_cap = ann.get("new_capital_inr") or merged_auth.get("new_auth_eq_cap_inr")
+        increase_amt = None
+        pct_increase = ann.get("percentage_increase")
+        if isinstance(old_cap, (int, float)) and old_cap < 1_00_000:
+            old_cap = None
+        if isinstance(new_cap, (int, float)) and new_cap < 1_00_000:
+            new_cap = None
+        if old_cap and new_cap and new_cap > old_cap:
+            increase_amt = round(float(new_cap) - float(old_cap), 2)
+        else:
+            increase_amt = ann.get("increase_amount_inr") or merged_auth.get("proposed_increase_inr")
+            if isinstance(increase_amt, (int, float)) and increase_amt < 1_00_000:
+                increase_amt = None
+        if old_cap and new_cap and new_cap <= old_cap:
+            increase_amt = None
+            pct_increase = None
+        if pct_increase is None and old_cap and new_cap:
             try:
-                import json, os
-                master_path = os.path.join(os.path.dirname(__file__), "agents", "master_data.json")
-                if os.path.exists(master_path):
-                    with open(master_path, "r") as f:
-                        master = json.load(f)
-                    if ticker in master:
-                        existing_cap = master[ticker].get("existing_auth_cap")
-            except:
-                pass
-
-        sentiment = ai_data.get("sentiment", "Neutral")
-        insight = ai_data.get("ai_insight") or ai_data.get("key_details", "")
+                pct_increase = round(((float(new_cap) - float(old_cap)) / float(old_cap)) * 100, 2)
+            except Exception:
+                pct_increase = None
 
         row_data = [
-            sr_no,
-            ann_date,
             ai_data.get("company_name") or ann.get("company_name", ""),
-            merged_auth.get("board_approval", "Not Available"),
-            merged_auth.get("date_of_board_meeting", "Not Available"),
-            _fmt_currency(existing_cap),
-            _fmt_currency(merged_auth.get("new_auth_eq_cap_inr")),
-            _fmt_currency(merged_auth.get("proposed_increase_inr")),
-            _resolve_cmp(ai_data, mkt_cache),
-            _resolve_market_cap(ai_data, mkt_cache),
-            ai_data.get("sector", "General"),
-            insight if sentiment in ["Positive", "Neutral"] else "",
-            insight if sentiment == "Negative" else "",
-            ai_data.get("trading_signal", ""),
+            ai_data.get("ticker") or ann.get("symbol") or ann.get("ticker", ""),
+            ann.get("exchange", "NSE"),
+            ann_date,
+            _fmt_currency(old_cap),
+            _fmt_currency(new_cap),
+            _fmt_currency(increase_amt),
+            f"{pct_increase:.2f}%" if pct_increase is not None else "Unavailable",
             ann.get("source_url", ""),
+            ann.get("pdf_url", ""),
         ]
 
         row = sr_no + 2
-        is_alt = (sr_no % 2 == 0)
-
-        # Row fill based on sentiment
-        if sentiment == "Positive":
-            row_fill = PatternFill("solid", fgColor=COLORS["positive_bg"])
-        elif sentiment == "Negative":
-            row_fill = PatternFill("solid", fgColor=COLORS["negative_bg"])
-        elif is_alt:
-            row_fill = PatternFill("solid", fgColor=COLORS["alt_row"])
-        else:
-            row_fill = None
+        row_fill = PatternFill("solid", fgColor=COLORS["alt_row"]) if sr_no % 2 == 0 else None
 
         for col_idx, value in enumerate(row_data, 1):
             cell = ws.cell(row=row, column=col_idx, value=value)
             cell.font = Font(name="Calibri", size=9)
             cell.border = THIN_BORDER
-            # Align text blocks left, others center
-            if col_idx in [3, 12, 13]:
+            if col_idx in [1, 9, 10]:
                 align = "left"
             else:
                 align = "center"
             cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
             if row_fill:
                 cell.fill = row_fill
-            # Color-code Action cell
-            if col_idx == 14:
-                if sentiment == "Positive":
-                    cell.font = Font(name="Calibri", size=9, bold=True, color="1E8449")
-                elif sentiment == "Negative":
-                    cell.font = Font(name="Calibri", size=9, bold=True, color="C0392B")
 
-        ws.row_dimensions[row].height = 40
+        ws.row_dimensions[row].height = 26
 
     ws.freeze_panes = "A3"
 

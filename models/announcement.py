@@ -48,6 +48,8 @@ class AuthorizedCapitalDetails(BaseModel):
     existing_auth_eq_cap_inr: Optional[float] = None
     new_auth_eq_cap_inr: Optional[float] = None
     proposed_increase_inr: Optional[float] = None
+    face_value_inr: Optional[float] = None
+    percentage_increase: Optional[float] = None
 
 
 class AIExtraction(BaseModel):
@@ -95,7 +97,7 @@ class AnnouncementResponse(BaseModel):
     id: str
     exchange: str
     company_name: str
-    ticker: Optional[str]
+    symbol: Optional[str]
     announcement_type: str
     announcement_date: str
     key_details: str
@@ -104,6 +106,12 @@ class AnnouncementResponse(BaseModel):
     ai_insight: str
     sector: Optional[str]
     source_url: str
+    pdf_url: Optional[str]
+    old_capital_inr: Optional[float]
+    new_capital_inr: Optional[float]
+    increase_amount_inr: Optional[float]
+    percentage_increase: Optional[float]
+    face_value_inr: Optional[float]
     cmp: Optional[float]
     market_cap_cr: Optional[float]
     processed: bool

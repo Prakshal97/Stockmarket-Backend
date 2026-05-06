@@ -95,7 +95,7 @@ def enrich_announcement(announcement: dict, ai_data: dict) -> dict:
         existing_auth = ai_data.get("authorized_capital") or {}
         
         merged_auth = {}
-        for key in ["board_approval", "date_of_board_meeting", "existing_auth_eq_cap_inr", "new_auth_eq_cap_inr", "proposed_increase_inr"]:
+        for key in ["board_approval", "date_of_board_meeting", "existing_auth_eq_cap_inr", "new_auth_eq_cap_inr", "proposed_increase_inr", "face_value_inr", "percentage_increase"]:
             val = extracted_auth.get(key)
             if val is None or val == "Not Available":
                 val = existing_auth.get(key)
@@ -141,6 +141,7 @@ def enrich_announcement(announcement: dict, ai_data: dict) -> dict:
                     n = float(merged_auth["new_auth_eq_cap_inr"])
                     if n > e:
                         merged_auth["proposed_increase_inr"] = n - e
+                        merged_auth["percentage_increase"] = round(((n - e) / e) * 100, 2)
                 except:
                     pass
 
@@ -198,6 +199,8 @@ def _extract_auth_capital_from_text(text: str) -> dict:
         "existing_auth_eq_cap_inr": None,
         "new_auth_eq_cap_inr": None,
         "proposed_increase_inr": None,
+        "face_value_inr": None,
+        "percentage_increase": None,
     }
 
     t = text.lower()
@@ -304,6 +307,22 @@ def _extract_auth_capital_from_text(text: str) -> dict:
                 auth_cap["new_auth_eq_cap_inr"] = vals[-1]
                 auth_cap["proposed_increase_inr"] = vals[-1] - vals[0]
 
+    # Face value
+    face_patterns = [
+        r'(?:face\s*value|fv|nominal\s*value)\s*(?:of|at|:|is|per\s+share)?\s*(?:rs\.?|inr\.?|₹)?\s*([\d,]+(?:\.\d+)?)',
+        r'(?:equity\s+shares?\s+of\s+)?(?:rs\.?|inr\.?|₹)?\s*([\d,]+(?:\.\d+)?)\s*(?:each|per\s+share)\b',
+    ]
+    for pat in face_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                face_val = float(m.group(1).replace(",", ""))
+                if 0 < face_val <= 1000:
+                    auth_cap["face_value_inr"] = face_val
+                    break
+            except:
+                pass
+
     # ── Compute proposed increase if we have both ─────────────────
     if (auth_cap["proposed_increase_inr"] is None
             and auth_cap["existing_auth_eq_cap_inr"] is not None
@@ -312,6 +331,18 @@ def _extract_auth_capital_from_text(text: str) -> dict:
         auth_cap["proposed_increase_inr"] = (
             auth_cap["new_auth_eq_cap_inr"] - auth_cap["existing_auth_eq_cap_inr"]
         )
+
+    if (auth_cap["percentage_increase"] is None
+            and auth_cap["existing_auth_eq_cap_inr"] is not None
+            and auth_cap["new_auth_eq_cap_inr"] is not None
+            and auth_cap["new_auth_eq_cap_inr"] > auth_cap["existing_auth_eq_cap_inr"]):
+        try:
+            auth_cap["percentage_increase"] = round(
+                ((auth_cap["new_auth_eq_cap_inr"] - auth_cap["existing_auth_eq_cap_inr"]) / auth_cap["existing_auth_eq_cap_inr"]) * 100,
+                2,
+            )
+        except:
+            pass
 
     return auth_cap
 
