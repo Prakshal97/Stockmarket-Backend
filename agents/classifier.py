@@ -6,113 +6,27 @@ Uses ONLY keyword matching and regex to:
 2. Extract financial values (existing/new capital) deterministically
 
 AI (Groq) is NEVER called from this module.
+
+10: 3-TIER CLASSIFICATION MODEL (Production Grade):
+11:   - VERIFIED: Explicit restructuring proof (Phrases or Capital Values)
+12:   - POSSIBLE: Context signals (EGM, Postal Ballot) without verified proof
+13:   - GENERAL: Everything else
+14: 
+15:   Decision logic:
+16:   1. If old/new capital extracted OR Rule 2/3 matched -> VERIFIED
+17:   2. If EGM/Postal Ballot/etc. matched -> POSSIBLE
+18:   3. Otherwise -> GENERAL
 """
 import re
 from typing import Optional
 
+# ── Confidence threshold for pass/fail decision ───────────────────────────────
+# Threshold calibrated from live NSE/BSE diagnostic:
+# Real filings max out at score=20 (Tata Capital postal ballot case).
+# The previous threshold of 40 was unreachable for real exchange data.
+CONFIDENCE_THRESHOLD = 20
 
-# ── Primary keywords that STRONGLY indicate Authorized Capital change ─────────
-
-AUTH_CAPITAL_KEYWORDS = [
-    # English spellings
-    "authorized capital",
-    "authorised capital",
-    "authorized share capital",
-    "authorised share capital",
-    "authorized equity capital",
-    "authorised equity capital",
-    # Increase phrases
-    "increase in authorized",
-    "increase in authorised",
-    "increase of authorized",
-    "increase of authorised",
-    "increase in the authorized",
-    "increase in the authorised",
-    # Alteration phrases (used by NSE/BSE official filings)
-    "alteration of capital",
-    "alteration in capital",
-    "alteration of memorandum",
-    "alteration in memorandum",
-    "capital clause",
-    "clause v of the memorandum",
-    "memorandum of association",
-    # General capital structure
-    "capital structure change",
-    "increase in capital",
-    "reclassification of capital",
-    "reclassification of authorized",
-    "reclassification of authorised",
-    "enhancement of authorized",
-    "enhancement of authorised",
-    # Hindi transliteration sometimes used
-    "paidup capital",
-    "paid-up capital increase",
-    "increase in share capital",
-    "raise in authorized",
-    "raise in authorised",
-]
-
-# Strong phrases that indicate a dedicated authorized-capital filing.
-AUTH_CAPITAL_STRONG_PHRASES = [
-    "increase in authorized capital",
-    "increase in authorised capital",
-    "increase in authorized share capital",
-    "increase in authorised share capital",
-    "authorized share capital",
-    "authorised share capital",
-    "authorized capital",
-    "authorised capital",
-    "alteration of capital clause",
-    "alteration in capital clause",
-    "amendment to memorandum",
-    "amendment to moa",
-    "capital clause",
-]
-
-# Terms that usually indicate the filing is a mixed announcement and should not
-# be surfaced as a pure authorized-capital event.
-AUTH_CAPITAL_REJECT_TERMS = [
-    "financial results",
-    "audited results",
-    "quarterly results",
-    "annual results",
-    "dividend",
-    "bonus issue",
-    "bonus shares",
-    "preferential issue",
-    "preferential basis",
-    "private placement",
-    "qualified institutions placement",
-    "qip",
-    "fund raising",
-    "fund-raising",
-    "issue of equity shares",
-    "issue of shares",
-    "warrants",
-    "convertible instruments",
-    "earnings call",
-    "board meeting outcome",
-    "board meeting intimation",
-    "meeting of the board",
-    "outcome of board meeting",
-    "appointment of director",
-    "appointment of a director",
-    "change of name",
-    "alteration of main object",
-    "main object clause",
-    "voluntary surrender",
-    "resignation",
-    "results and",
-    "results, dividend",
-    "results, bonus",
-    "rights issue",
-    "buyback",
-    "merger",
-    "amalgamation",
-    "acquisition",
-]
-
-# Phrases that NEGATE — it's talking about capital but NOT changing it
+# ── Phrases that NEGATE — it's talking about capital but NOT changing it ──────
 NEGATION_PATTERNS = [
     "no change in authorized",
     "no change in authorised",
@@ -127,72 +41,171 @@ NEGATION_PATTERNS = [
     "does not affect authorised",
 ]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# In-memory store for tracking rejected candidates (for diagnostic reporting)
+# ─────────────────────────────────────────────────────────────────────────────
+_rejected_candidates: list = []   # list of dicts with score + metadata
+MAX_REJECTED_STORE = 500          # rolling buffer size
 
-def is_pure_authorized_capital(announcement: dict) -> bool:
+
+def _record_rejected(company: str, exchange: str, subject: str, score: int,
+                     positives: list, negatives: list) -> None:
+    """Keep a rolling buffer of rejected candidates for audit reporting."""
+    global _rejected_candidates
+    _rejected_candidates.append({
+        "company": company,
+        "exchange": exchange,
+        "subject": subject[:120],
+        "score": score,
+        "positives": positives,
+        "negatives": negatives,
+    })
+    # Keep only the last MAX_REJECTED_STORE entries
+    if len(_rejected_candidates) > MAX_REJECTED_STORE:
+        _rejected_candidates = _rejected_candidates[-MAX_REJECTED_STORE:]
+
+
+def get_top_rejected_candidates(n: int = 20) -> list:
     """
-    Return True only for dedicated authorized-capital announcements.
+    Return the top-N rejected candidates sorted by score descending.
+    These are the filings most likely to be genuine but incorrectly filtered.
+    """
+    return sorted(_rejected_candidates, key=lambda x: x["score"], reverse=True)[:n]
 
-    This is intentionally strict: a filing must be primarily about capital
-    alteration / authorized share capital, and must not be a mixed results,
-    dividend, bonus, or board-outcome disclosure that merely mentions capital.
+
+def extract_evidence_snippet(text: str, keywords: list) -> str:
+    """Extract a 150-char snippet containing the first matched keyword."""
+    if not text: return ""
+    text_clean = text.replace("\n", " ").replace("\r", " ")
+    for kw in keywords:
+        idx = text_clean.lower().find(kw.lower())
+        if idx != -1:
+            start = max(0, idx - 40)
+            end = min(len(text_clean), idx + 110)
+            snippet = text_clean[start:end].strip()
+            if start > 0: snippet = "..." + snippet
+            if end < len(text_clean): snippet = snippet + "..."
+            return snippet
+    return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core scoring engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+def evaluate_authorized_capital(announcement: dict) -> dict:
+    """
+    Evaluate an announcement using the 3-tier Production Accuracy model.
+    
+    Tiers:
+      - verified: Explicit restructuring proof found.
+      - possible: Context signals present, but no hard proof.
+      - general: No capital-restructuring indicators.
     """
     subject = (announcement.get("raw_subject", "") or "").lower().strip()
-    body = (announcement.get("raw_body", "") or "").lower().strip()
-    title = (announcement.get("title", "") or "").lower().strip()
-    ai_title = (announcement.get("ai_data", {}) or {}).get("title", "")
-    ai_title = (ai_title or "").lower().strip()
+    body    = (announcement.get("raw_body",    "") or "").lower().strip()
+    title   = (announcement.get("title",       "") or "").lower().strip()
+    exchange = announcement.get("exchange", "Unknown")
+    company  = announcement.get("company_name", "Unknown")
 
-    full_text = " ".join(filter(None, [subject, body, title, ai_title]))
+    full_text = " ".join(filter(None, [subject, body, title]))
+    
+    matched_verified = []
+    matched_possible = []
+    
+    # ── VERIFIED RULE 1: Capital Transformation (from Rs X to Rs Y) ───────────
+    if "from rs" in full_text and " to rs" in full_text:
+        matched_verified.append("transformation regex (from Rs X to Rs Y)")
+    
+    # ── VERIFIED RULE 2: Explicit Restructuring Phrases ───────────────────────
+    strong_phrases = [
+        "increase in authorized capital",
+        "increase in authorised capital",
+        "increase in authorized share capital",
+        "increase in authorised share capital",
+        "alteration of capital clause",
+        "alteration in capital clause",
+        "amendment to memorandum of association",
+        "amendment to moa",
+        "authorised equity share capital",
+        "raising of capital",
+        "increase the capital",
+        "alteration of clause v",
+    ]
+    for kw in strong_phrases:
+        if kw in full_text:
+            matched_verified.append(f"explicit phrase: {kw}")
 
-    has_strong_phrase = any(kw in subject or kw in title or kw in full_text for kw in AUTH_CAPITAL_STRONG_PHRASES)
-    has_reject_term = any(term in full_text for term in AUTH_CAPITAL_REJECT_TERMS)
-    has_auth_keyword = any(kw in full_text for kw in AUTH_CAPITAL_KEYWORDS)
+    # ── POSSIBLE TIER: Context Signals ────────────────────────────────────────
+    possible_signals = [
+        "postal ballot",
+        "extraordinary general meeting",
+        " egm",
+        "agm",
+        "shareholders meeting",
+        "newspaper publication",
+        "scrutinizer report",
+        "voting result",
+        "board meeting outcome",
+        "outcome of board meeting",
+    ]
+    for kw in possible_signals:
+        if kw in full_text:
+            matched_possible.append(f"context signal: {kw}")
 
-    if not has_auth_keyword:
-        return False
+    # ── Final Verdict ─────────────────────────────────────────────────────────
+    # A filing is VERIFIED only if matched_verified is not empty.
+    # Otherwise, it is POSSIBLE if matched_possible is not empty.
+    # Otherwise, it is GENERAL.
+    
+    category = "general"
+    confidence = "LOW"
+    evidence = ""
+    
+    if matched_verified:
+        category = "verified"
+        confidence = "HIGH"
+        evidence = extract_evidence_snippet(full_text, strong_phrases + ["from rs"])
+    elif matched_possible:
+        # Check if there is AT LEAST a bare mention of 'capital' or 'authorized'
+        # to qualify as 'possible'
+        if any(kw in full_text for kw in ["capital", "authorized", "authorised"]):
+            category = "possible"
+            confidence = "MEDIUM"
+            evidence = extract_evidence_snippet(full_text, possible_signals)
+        else:
+            category = "general"
+    
+    # Audit Logging
+    if category != "general":
+        verdict = f"[{category.upper()}]"
+        print(f"\n[CLASSIFIER] {verdict} {company}")
+        print(f"  Subject: {subject[:80]}")
+        print(f"  Evidence: {evidence}")
+        print(f"  Matches: {matched_verified if matched_verified else matched_possible}")
 
-    if has_reject_term:
-        return False
-
-    # Strong phrase in the subject/title is the cleanest signal.
-    if has_strong_phrase and (any(kw in subject for kw in AUTH_CAPITAL_STRONG_PHRASES) or any(kw in title for kw in AUTH_CAPITAL_STRONG_PHRASES)):
-        return True
-
-    # Allow a body-only match only when it is clearly a capital-clause filing
-    # and not a mixed disclosure.
-    capital_clause_context = any(term in full_text for term in [
-        "capital clause",
-        "memorandum of association",
-        "moa",
-        "alteration of capital",
-        "authorized share capital",
-        "authorised share capital",
-    ])
-    return has_auth_keyword and capital_clause_context and not has_reject_term
+    return {
+        "passed": category == "verified", # Backward compat
+        "category": category,
+        "confidence": confidence,
+        "reason": f"Matches: {matched_verified if matched_verified else matched_possible}",
+        "evidence": evidence,
+        "score": 100 if category == "verified" else (50 if category == "possible" else 0),
+        "threshold": 100,
+        "source": "Title" if any(kw in subject for kw in strong_phrases) else "Body",
+        "title": subject,
+        "exchange": exchange,
+        "matched_kws": matched_verified if matched_verified else matched_possible,
+        "rejected_kws": []
+    }
 
 
 def classify_announcement(announcement: dict) -> str:
     """
-    Classify an announcement as 'authorized_capital' or 'general'.
-
-    Uses strict intent-based matching on BOTH subject AND body/PDF text.
-    Returns 'authorized_capital' only for dedicated capital filings.
+    Route announcement to its designated tier.
     """
-    subject = (announcement.get("raw_subject", "") or "").lower().strip()
-    body = (announcement.get("raw_body", "") or "").lower().strip()
-    full_text = subject + " " + body
-
-    if any(neg in full_text for neg in NEGATION_PATTERNS):
-        return "general"
-
-    if is_pure_authorized_capital(announcement):
-        return "authorized_capital"
-
-    # Fallback: if the wording is very explicit and still non-mixed, allow it.
-    if any(kw in subject for kw in AUTH_CAPITAL_STRONG_PHRASES) and not any(term in full_text for term in AUTH_CAPITAL_REJECT_TERMS):
-        return "authorized_capital"
-
-    return "general"
+    res = evaluate_authorized_capital(announcement)
+    return res["category"]
 
 
 # ── Deterministic Financial Value Extraction ──────────────────────────────────
@@ -238,7 +251,7 @@ def _compute_capital_diff(existing: Optional[float], new: Optional[float]) -> Op
         return None
     try:
         existing_val = float(existing)
-        new_val = float(new)
+        new_val      = float(new)
         if new_val <= existing_val:
             return None
         return new_val - existing_val
@@ -256,13 +269,13 @@ def extract_auth_capital_deterministic(text: str) -> dict:
         existing_auth_eq_cap_inr, new_auth_eq_cap_inr, proposed_increase_inr
     """
     result = {
-        "board_approval": "Not Available",
-        "date_of_board_meeting": "Not Available",
+        "board_approval":          "Not Available",
+        "date_of_board_meeting":   "Not Available",
         "existing_auth_eq_cap_inr": None,
-        "new_auth_eq_cap_inr": None,
-        "proposed_increase_inr": None,
-        "face_value_inr": None,
-        "percentage_increase": None,
+        "new_auth_eq_cap_inr":      None,
+        "proposed_increase_inr":    None,
+        "face_value_inr":           None,
+        "percentage_increase":      None,
     }
 
     t = text.lower()
@@ -304,11 +317,11 @@ def extract_auth_capital_deterministic(text: str) -> dict:
     )
     if from_to:
         existing = _parse_amount(from_to.group(1))
-        new = _parse_amount(from_to.group(2))
+        new      = _parse_amount(from_to.group(2))
         if existing and new and new != existing:
             result["existing_auth_eq_cap_inr"] = existing
-            result["new_auth_eq_cap_inr"] = new
-            result["proposed_increase_inr"] = _compute_capital_diff(existing, new)
+            result["new_auth_eq_cap_inr"]      = new
+            result["proposed_increase_inr"]    = _compute_capital_diff(existing, new)
 
     # ── Pattern 2: "existing capital: X" / "new/revised capital: Y" ──────────
     if result["existing_auth_eq_cap_inr"] is None:
@@ -368,8 +381,8 @@ def extract_auth_capital_deterministic(text: str) -> dict:
             vals = sorted(set(vals))
             if len(vals) >= 2 and vals[-1] != vals[0]:
                 result["existing_auth_eq_cap_inr"] = vals[0]
-                result["new_auth_eq_cap_inr"] = vals[-1]
-                result["proposed_increase_inr"] = _compute_capital_diff(vals[0], vals[-1])
+                result["new_auth_eq_cap_inr"]      = vals[-1]
+                result["proposed_increase_inr"]    = _compute_capital_diff(vals[0], vals[-1])
 
     # ── Face value extraction ─────────────────────────────────────────────────
     face_patterns = [
@@ -393,13 +406,16 @@ def extract_auth_capital_deterministic(text: str) -> dict:
         if diff is not None:
             result["proposed_increase_inr"] = diff
 
-    if (result["percentage_increase"] is None
-            and result["existing_auth_eq_cap_inr"]
-            and result["new_auth_eq_cap_inr"]
-            and result["new_auth_eq_cap_inr"] > result["existing_auth_eq_cap_inr"]):
+    if (
+        result["percentage_increase"] is None
+        and result["existing_auth_eq_cap_inr"]
+        and result["new_auth_eq_cap_inr"]
+        and result["new_auth_eq_cap_inr"] > result["existing_auth_eq_cap_inr"]
+    ):
         try:
             result["percentage_increase"] = round(
-                ((result["new_auth_eq_cap_inr"] - result["existing_auth_eq_cap_inr"]) / result["existing_auth_eq_cap_inr"]) * 100,
+                ((result["new_auth_eq_cap_inr"] - result["existing_auth_eq_cap_inr"])
+                 / result["existing_auth_eq_cap_inr"]) * 100,
                 2,
             )
         except Exception:
@@ -408,7 +424,7 @@ def extract_auth_capital_deterministic(text: str) -> dict:
     # ── Sanitize: reject face values picked up as capital ─────────────────────
     for key in ["existing_auth_eq_cap_inr", "new_auth_eq_cap_inr"]:
         val = result.get(key)
-        if val is not None and val < 10_00_000:  # < 10 Lakh is likely face value
+        if val is not None and val < 10_00_000:   # < 10 Lakh is likely face value
             result[key] = None
 
     return result

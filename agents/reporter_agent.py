@@ -130,7 +130,9 @@ def generate_segregated_excel(auth_announcements: List[Dict], general_announceme
     Sheet 2: Other Announcements (7 columns)
     """
     all_anns = auth_announcements + general_announcements
-    mkt_cache = _prefetch_market_data(all_anns)
+    # Removed slow sequential _prefetch_market_data call.
+    # We will use CMP/Market Cap data already stored in the database.
+    mkt_cache = {} 
 
     wb = Workbook()
 
@@ -148,7 +150,8 @@ def generate_segregated_excel(auth_announcements: List[Dict], general_announceme
 
 def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
     """Generate Excel with ONLY authorized capital data (backward compat)."""
-    mkt_cache = _prefetch_market_data(announcements)
+    # Removed slow sequential _prefetch_market_data call.
+    mkt_cache = {}
     wb = Workbook()
     ws = wb.active
     ws.title = "Authorized Capital"
@@ -158,7 +161,8 @@ def generate_authorized_capital_excel(announcements: List[Dict]) -> bytes:
 
 def generate_full_report_excel(announcements: List[Dict]) -> bytes:
     """Legacy: Generate report from mixed announcements (backward compat)."""
-    mkt_cache = _prefetch_market_data(announcements)
+    # Removed slow sequential _prefetch_market_data call.
+    mkt_cache = {}
     wb = Workbook()
     ws = wb.active
     ws.title = "Full AI Report"
@@ -175,7 +179,7 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
     Write Authorized Capital sheet with the exact 10 columns required by the client.
     """
     # ── Title ─────────────────────────────────────────────────────
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:L1")
     title_cell = ws["A1"]
     title_cell.value = f"SECTION 1: AUTHORIZED CAPITAL — {datetime.now().strftime('%d %B %Y')}"
     title_cell.font = Font(name="Calibri", bold=True, size=14, color=COLORS["header_font"])
@@ -185,10 +189,10 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
 
     # ── Headers (15 columns) ──────────────────────────────────────
     headers = [
-        "Company", "Symbol", "Exchange", "Date", "Old Capital",
-        "New Capital", "Increase Amount", "% Increase", "Source URL", "PDF URL"
+        "Company", "Symbol", "Exchange", "Date", "CMP", "Market Cap (Cr)", 
+        "Old Capital", "New Capital", "Increase Amount", "% Increase", "Source URL", "PDF URL"
     ]
-    col_widths = [30, 14, 12, 14, 18, 18, 18, 12, 28, 28]
+    col_widths = [30, 14, 12, 14, 15, 18, 18, 18, 18, 12, 28, 28]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=2, column=col_idx, value=header)
@@ -201,7 +205,7 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
 
     # ── Data Rows ─────────────────────────────────────────────────
     if not announcements:
-        ws.merge_cells("A3:J3")
+        ws.merge_cells("A3:L3")
         cell = ws["A3"]
         cell.value = "No Authorized Capital announcements found in the last 48 hours."
         cell.font = Font(name="Calibri", size=11, italic=True, color="888888")
@@ -252,6 +256,8 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
             ai_data.get("ticker") or ann.get("symbol") or ann.get("ticker", ""),
             ann.get("exchange", "NSE"),
             ann_date,
+            _resolve_cmp(ai_data, {}), # Use {} since we don't want to block on mkt_cache
+            _resolve_market_cap(ai_data, {}),
             _fmt_currency(old_cap),
             _fmt_currency(new_cap),
             _fmt_currency(increase_amt),
@@ -267,7 +273,7 @@ def _write_auth_capital_sheet(ws, announcements: List[Dict], mkt_cache: dict):
             cell = ws.cell(row=row, column=col_idx, value=value)
             cell.font = Font(name="Calibri", size=9)
             cell.border = THIN_BORDER
-            if col_idx in [1, 9, 10]:
+            if col_idx in [1, 11, 12]:
                 align = "left"
             else:
                 align = "center"
@@ -285,7 +291,7 @@ def _write_general_sheet(ws, announcements: List[Dict]):
     Write Other Announcements sheet with 7 columns.
     """
     # ── Title ─────────────────────────────────────────────────────
-    ws.merge_cells("A1:G1")
+    ws.merge_cells("A1:I1")
     title_cell = ws["A1"]
     title_cell.value = f"SECTION 2: OTHER ANNOUNCEMENTS — {datetime.now().strftime('%d %B %Y')}"
     title_cell.font = Font(name="Calibri", bold=True, size=14, color=COLORS["header_font"])
@@ -295,9 +301,9 @@ def _write_general_sheet(ws, announcements: List[Dict]):
 
     # ── Headers (7 columns) ───────────────────────────────────────
     headers = [
-        "Company", "Date", "Category", "Sentiment", "Impact", "Summary", "Source"
+        "Company", "Date", "Category", "CMP", "Market Cap (Cr)", "Sentiment", "Impact", "Summary", "Source"
     ]
-    col_widths = [32, 15, 24, 12, 12, 55, 15]
+    col_widths = [32, 15, 24, 15, 18, 12, 12, 55, 15]
 
     for col_idx, (header, width) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=2, column=col_idx, value=header)
@@ -310,7 +316,7 @@ def _write_general_sheet(ws, announcements: List[Dict]):
 
     # ── Data Rows ─────────────────────────────────────────────────
     if not announcements:
-        ws.merge_cells("A3:G3")
+        ws.merge_cells("A3:I3")
         cell = ws["A3"]
         cell.value = "No other announcements found."
         cell.font = Font(name="Calibri", size=11, italic=True, color="888888")
@@ -335,6 +341,8 @@ def _write_general_sheet(ws, announcements: List[Dict]):
             ai_data.get("company_name") or ann.get("company_name", ""),
             ann_date,
             ai_data.get("announcement_type", "Other"),
+            _resolve_cmp(ai_data, {}),
+            _resolve_market_cap(ai_data, {}),
             sentiment,
             ai_data.get("impact_level") or ai_data.get("impact", "Low"),
             summary,
@@ -355,7 +363,7 @@ def _write_general_sheet(ws, announcements: List[Dict]):
             cell = ws.cell(row=row, column=col_idx, value=value)
             cell.font = Font(name="Calibri", size=10)
             cell.border = THIN_BORDER
-            if col_idx in [1, 6]:
+            if col_idx in [1, 8]:
                 align = "left"
             else:
                 align = "center"

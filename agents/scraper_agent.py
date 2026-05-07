@@ -195,13 +195,17 @@ def _should_scan_bse_pdf(subject: str, body: str) -> bool:
     return any(term in text for term in strong_terms)
 
 
-def extract_pdf_text(pdf_url: str, max_pages: int = 10) -> Optional[str]:
-    """Download and extract text from a PDF announcement attachment."""
+def extract_pdf_text(pdf_url: str, max_pages: int = 10) -> Dict:
+    """
+    Download and extract text from a PDF announcement attachment.
+    Implements OCR fallback if native text extraction fails or yields too little text.
+    Returns: dict with keys: text, method, success, error
+    """
+    result = {"text": None, "method": "none", "success": False, "error": ""}
     try:
         import pdfplumber
 
         headers = {"User-Agent": NSE_USER_AGENT}
-        # NSE archives may need cookie
         if "nsearchives" in pdf_url or "nseindia" in pdf_url:
             resp = NSE_SESSION.get(pdf_url, timeout=30)
         else:
@@ -209,26 +213,64 @@ def extract_pdf_text(pdf_url: str, max_pages: int = 10) -> Optional[str]:
         
         resp.raise_for_status()
         if len(resp.content) < 100:
-            return None
+            result["error"] = "PDF too small or empty"
+            return result
 
         text_parts = []
+        has_images = False
+        
         with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
             for page in pdf.pages[:max_pages]:
                 page_text = page.extract_text()
                 if page_text:
                     text_parts.append(page_text)
-                # Extract tables too
+                
+                # Check if page might be a scanned image
+                if len(page.images) > 0:
+                    has_images = True
+                    
                 tables = page.extract_tables()
                 for table in tables:
                     for row in table:
                         if row:
                             text_parts.append(" | ".join(str(c) for c in row if c))
 
-        result = "\n".join(text_parts)[:10000]
-        return result if result.strip() else None
+        extracted_text = "\n".join(text_parts)[:10000]
+        
+        # Check if we got meaningful text. If not, try OCR
+        if len(extracted_text.strip()) < 50 and has_images:
+            try:
+                import pytesseract
+                from pdf2image import convert_from_bytes
+                
+                images = convert_from_bytes(resp.content, first_page=1, last_page=max_pages)
+                ocr_text = []
+                for img in images:
+                    # Basic preprocessing could be added here
+                    ocr_text.append(pytesseract.image_to_string(img))
+                    
+                ocr_final = "\n".join(ocr_text)[:10000]
+                if len(ocr_final.strip()) > 10:
+                    result["text"] = ocr_final
+                    result["method"] = "ocr"
+                    result["success"] = True
+                    return result
+            except Exception as ocr_e:
+                print(f"INFO: OCR fallback failed for {pdf_url}: {ocr_e}")
+                result["error"] += f" | OCR Failed: {ocr_e}"
+        
+        if extracted_text.strip():
+            result["text"] = extracted_text
+            result["method"] = "pdf_text"
+            result["success"] = True
+        else:
+            result["error"] = "No extractable text found"
+            
+        return result
     except Exception as e:
         print(f"WARNING: PDF extraction failed for {pdf_url}: {e}")
-        return None
+        result["error"] = str(e)
+        return result
 
 
 def fetch_nse_announcements(from_date: Optional[str] = None, to_date: Optional[str] = None) -> List[Dict]:
@@ -337,15 +379,23 @@ def fetch_nse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                     "announcement_id": _make_announcement_id("NSE", str(seq_no) + subject[:20]),
                 }
 
+                ann["extraction_method"] = "none"
+                ann["extraction_success"] = False
+                ann["extraction_error"] = ""
+
                 # ── KEY FIX: Pre-scan PDF for suspect subjects ───────────────
                 # "Outcome of Board Meeting" items hide auth-capital content in PDFs.
                 # We fetch the PDF text NOW so classifier can detect it.
                 if is_suspect_subject(subject) and pdf_url and not body:
                     print(f"INFO: [NSE] Pre-scanning PDF for '{company}' ({subject[:50]})...")
-                    pdf_text = extract_pdf_text(pdf_url)
-                    if pdf_text:
-                        ann["raw_body"] = pdf_text
-                        print(f"INFO: [NSE] PDF pre-scan OK for {company} ({len(pdf_text)} chars)")
+                    pdf_res = extract_pdf_text(pdf_url)
+                    if pdf_res["success"] and pdf_res["text"]:
+                        ann["raw_body"] = pdf_res["text"]
+                        ann["extraction_method"] = pdf_res["method"]
+                        ann["extraction_success"] = True
+                        print(f"INFO: [NSE] PDF pre-scan OK ({pdf_res['method']}) for {company} ({len(pdf_res['text'])} chars)")
+                    else:
+                        ann["extraction_error"] = pdf_res["error"]
 
                 announcements.append(ann)
 
@@ -466,13 +516,21 @@ def fetch_bse_announcements(from_date: Optional[str] = None, to_date: Optional[s
                 "announcement_id": _make_announcement_id("BSE", str(news_id) + subject[:20]),
             }
 
+            ann["extraction_method"] = "none"
+            ann["extraction_success"] = False
+            ann["extraction_error"] = ""
+
             # Pre-scan PDFs for suspect subjects (same logic as NSE)
             if _should_scan_bse_pdf(subject, body) and pdf_url:
                 print(f"INFO: [BSE] Pre-scanning PDF for '{company}' ({subject[:50]})...")
-                pdf_text = extract_pdf_text(pdf_url)
-                if pdf_text:
-                    ann["raw_body"] = pdf_text
-                    print(f"INFO: [BSE] PDF pre-scan OK for {company} ({len(pdf_text)} chars)")
+                pdf_res = extract_pdf_text(pdf_url)
+                if pdf_res["success"] and pdf_res["text"]:
+                    ann["raw_body"] = pdf_res["text"]
+                    ann["extraction_method"] = pdf_res["method"]
+                    ann["extraction_success"] = True
+                    print(f"INFO: [BSE] PDF pre-scan OK ({pdf_res['method']}) for {company} ({len(pdf_res['text'])} chars)")
+                else:
+                    ann["extraction_error"] = pdf_res["error"]
 
             announcements.append(ann)
 

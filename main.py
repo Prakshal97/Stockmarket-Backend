@@ -195,7 +195,7 @@ async def get_authorized_capital(
                 pct_increase = None
         results.append({
             "id": ann.get("id") or ann.get("announcement_id") or ann.get("_id"),
-            "category": ann.get("category", "authorized_capital"),
+            "category": ann.get("category", "verified"),
             "exchange": _safe(ann.get("exchange"), "NSE"),
             "company_name": _safe(ann.get("company_name")),
             "symbol": _safe(ann.get("symbol") or ann.get("ticker")),
@@ -221,10 +221,40 @@ async def get_authorized_capital(
             "source_url": _safe(ann.get("source_url"), "#"),
             "pdf_url": ann.get("pdf_url"),
             "created_at": _safe(ann.get("created_at")),
+            # Enhanced Production Metadata
+            "confidence": _safe(ann.get("confidence_level") or ai_data.get("confidence")),
+            "evidence_snippet": _safe(ann.get("evidence_snippet") or ai_data.get("evidence_snippet")),
+            "extraction_method": _safe(ann.get("extraction_method"), "Title Scan"),
         })
 
     return {"announcements": results, "total": total, "skip": skip, "limit": limit, "refreshed": refresh}
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1B: POSSIBLE CAPITAL RELATED API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/possible-capital")
+async def get_possible_capital(limit: int = Query(50, ge=1, le=200)):
+    """Fetch filings with context signals (EGM, Postal Ballot) but no verified proof."""
+    from database import get_possible_capital_list
+    announcements = await get_possible_capital_list(limit=limit)
+    
+    results = []
+    for ann in announcements:
+        results.append({
+            "id": ann.get("announcement_id"),
+            "company_name": _safe(ann.get("company_name")),
+            "symbol": _safe(ann.get("ticker")),
+            "raw_subject": _safe(ann.get("raw_subject")),
+            "announcement_date": _safe(ann.get("announcement_date")),
+            "exchange": _safe(ann.get("exchange")),
+            "pdf_url": ann.get("pdf_url"),
+            "category": "possible",
+            "confidence": "MEDIUM",
+            "matched_keywords": ann.get("matched_keywords", [])
+        })
+    return {"announcements": results, "count": len(results)}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 2: GENERAL ANNOUNCEMENTS API (SECONDARY)
@@ -371,7 +401,8 @@ async def download_segregated_excel(
     auth_anns = await get_authorized_capital_list(limit=limit, skip=0)
     general_anns = await get_general_announcements(limit=limit)
 
-    excel_bytes = generate_segregated_excel(auth_anns, general_anns)
+    import asyncio
+    excel_bytes = await asyncio.to_thread(generate_segregated_excel, auth_anns, general_anns)
     filename = f"AlphaIntel_Segregated_{datetime.now().strftime('%d%m%Y_%H%M')}.xlsx"
 
     return StreamingResponse(
@@ -390,7 +421,8 @@ async def download_authorized_capital_excel(
     from agents.reporter_agent import generate_authorized_capital_excel
 
     announcements = await get_authorized_capital_list(limit=limit, skip=0)
-    excel_bytes = generate_authorized_capital_excel(announcements)
+    import asyncio
+    excel_bytes = await asyncio.to_thread(generate_authorized_capital_excel, announcements)
     filename = f"Authorized_Capital_{datetime.now().strftime('%d%m%Y')}.xlsx"
 
     return StreamingResponse(
@@ -415,7 +447,8 @@ async def download_full_report(
         limit=limit, exchange=exchange,
         sentiment=sentiment, impact=impact
     )
-    excel_bytes = generate_full_report_excel(announcements)
+    import asyncio
+    excel_bytes = await asyncio.to_thread(generate_full_report_excel, announcements)
     filename = f"NSE_BSE_Report_{datetime.now().strftime('%d%m%Y_%H%M')}.xlsx"
 
     return StreamingResponse(

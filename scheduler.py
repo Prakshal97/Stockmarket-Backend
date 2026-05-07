@@ -4,11 +4,10 @@ every N minutes automatically.
 
 Architecture:
   Step 1: Fetch all announcements from NSE/BSE
-  Step 2: Classify each as 'authorized_capital' or 'general'
-  Step 3: Route to correct collection
-  Step 4: Process unprocessed items in each collection separately
-  Step 5: Promotion logic: If a general announcement's PDF contains Auth Capital info, move it.
-  Step 6: Cleanup old data from both collections
+  Step 2: Classify as 'verified', 'possible', or 'general'
+  Step 3: Deduplicate (cross-exchange) and route to correct collection
+  Step 4: Process unprocessed items (PDF extraction → Re-classify → Promote/Demote)
+  Step 5: Cleanup old data
 """
 import asyncio
 import os
@@ -30,10 +29,20 @@ def get_cached_recent_authorized_capital() -> list:
     """Return the most recently built live authorized-capital cache."""
     return _auth_live_cache.get("data", [])
 
+def _apply_classification_metadata(ann: dict, result: dict):
+    """Apply tracking metadata from classifier result."""
+    ann["classifier_score"] = result.get("score", 0)
+    ann["matched_keywords"] = result.get("matched_kws", [])
+    ann["rejected_keywords"] = result.get("rejected_kws", [])
+    ann["classification_reason"] = result.get("reason", "")
+    ann["confidence_level"] = result.get("confidence", "NONE")
+    ann["category"] = result.get("category", "general")
+    ann["evidence_snippet"] = result.get("evidence", "")
+
 async def run_pipeline():
     """Full pipeline: Scrape → Classify → Route → Process → Save."""
     from agents.scraper_agent import fetch_all_announcements
-    from agents.classifier import is_pure_authorized_capital
+    from agents.classifier import evaluate_authorized_capital
     from database import (
         upsert_authorized_capital, upsert_general_announcement,
         cleanup_old_announcements
@@ -46,34 +55,44 @@ async def run_pipeline():
     # ── Step 1: Fetch ─────────────────────────────────────────────────────────
     raw_announcements = await asyncio.to_thread(fetch_all_announcements)
 
-    # ── Step 2 & 3: Classify and Route ────────────────────────────────────────
-    auth_new = 0
-    general_new = 0
+    # ── Step 2 & 3: Classify, Deduplicate and Route ──────────────────────────
+    auth_new = possible_new = general_new = 0
+
+    from database import is_duplicate_filing, upsert_possible_capital, upsert_authorized_capital, upsert_general_announcement
 
     for ann in raw_announcements:
-        if is_pure_authorized_capital(ann):
-            is_new = await upsert_authorized_capital(ann)
-            if is_new:
-                auth_new += 1
-                print(f"NEW AUTH: {ann.get('company_name')} — {ann.get('raw_subject', '')[:60]}")
-        else:
-            is_new = await upsert_general_announcement(ann)
-            if is_new:
-                general_new += 1
+        try:
+            # Cross-exchange deduplication
+            if await is_duplicate_filing(ann):
+                continue
 
-    print(f"CLASSIFY: {auth_new} new auth capital + {general_new} new general (from {len(raw_announcements)} fetched)")
+            result = evaluate_authorized_capital(ann)
+            _apply_classification_metadata(ann, result)
+            
+            category = result["category"]
+            if category == "verified":
+                if await upsert_authorized_capital(ann): auth_new += 1
+            elif category == "possible":
+                if await upsert_possible_capital(ann): possible_new += 1
+            else:
+                if await upsert_general_announcement(ann): general_new += 1
+        except Exception as e:
+            print(f"ERROR: Failed to route announcement {ann.get('announcement_id')}: {e}")
+
+    print(f"CLASSIFY: {auth_new} verified + {possible_new} possible + {general_new} general (from {len(raw_announcements)} fetched)")
 
     # ── Step 4: Process Collections ───────────────────────────────────────────
     auth_processed = await _process_authorized_capital(MAX_PROCESS)
+    possible_processed = await _process_possible_capital(MAX_PROCESS)
     general_processed = await _process_general_announcements(MAX_PROCESS)
 
-    total_processed = auth_processed + general_processed
+    total_processed = auth_processed + possible_processed + general_processed
     last_run["time"] = datetime.utcnow().isoformat() + "Z"
     last_run["count"] = total_processed
     last_run["auth_new"] = auth_new
     last_run["general_new"] = general_new
 
-    print(f"SUCCESS: Pipeline complete: {auth_processed} auth + {general_processed} general processed")
+    print(f"SUCCESS: Pipeline complete: {auth_processed} auth + {possible_processed} possible + {general_processed} general processed")
 
     await cleanup_old_announcements()
     print(f"{'='*60}\n")
@@ -81,7 +100,7 @@ async def run_pipeline():
 async def run_pipeline_extended(days: int = 2):
     """Extended pipeline for force-fetching historical data."""
     from agents.scraper_agent import fetch_nse_announcements, fetch_bse_announcements
-    from agents.classifier import is_pure_authorized_capital
+    from agents.classifier import evaluate_authorized_capital
     from database import (
         upsert_authorized_capital, upsert_general_announcement,
         cleanup_old_announcements
@@ -94,9 +113,9 @@ async def run_pipeline_extended(days: int = 2):
 
     hours = min(days * 24, int(os.getenv("FETCH_WINDOW_HOURS", "48")))
     from_date_nse = (datetime.now() - timedelta(hours=hours)).strftime("%d-%m-%Y")
-    to_date_nse = datetime.now().strftime("%d-%m-%Y")
+    to_date_nse   = datetime.now().strftime("%d-%m-%Y")
     from_date_bse = (datetime.now() - timedelta(hours=hours)).strftime("%Y%m%d")
-    to_date_bse = datetime.now().strftime("%Y%m%d")
+    to_date_bse   = datetime.now().strftime("%Y%m%d")
 
     nse = await asyncio.to_thread(fetch_nse_announcements, from_date_nse, to_date_nse)
     time.sleep(2)
@@ -107,7 +126,9 @@ async def run_pipeline_extended(days: int = 2):
 
     auth_new = general_new = 0
     for ann in raw_announcements:
-        if is_pure_authorized_capital(ann):
+        result = evaluate_authorized_capital(ann)
+        _apply_classification_metadata(ann, result)
+        if result["passed"]:
             is_new = await upsert_authorized_capital(ann)
             if is_new:
                 auth_new += 1
@@ -155,7 +176,7 @@ async def refresh_recent_authorized_capital(
         return _auth_live_cache.get("data", [])
 
     from agents.scraper_agent import fetch_nse_announcements, fetch_bse_announcements
-    from agents.classifier import is_pure_authorized_capital, extract_auth_capital_deterministic
+    from agents.classifier import evaluate_authorized_capital, extract_auth_capital_deterministic
     if not lightweight:
         from agents.analyst_agent import enrich_announcement
     if persist:
@@ -169,6 +190,15 @@ async def refresh_recent_authorized_capital(
     nse = await asyncio.to_thread(fetch_nse_announcements, nse_from, nse_to)
     bse = await asyncio.to_thread(fetch_bse_announcements, bse_from, bse_to)
     raw_announcements = nse + bse
+    
+    counters = {
+        "fetched": len(raw_announcements),
+        "skipped_stale": 0,
+        "rejected_mixed": 0,
+        "rejected_low_conf": 0,
+        "routed_general": 0,
+        "inserted_auth": 0
+    }
 
     rows = []
     for ann in raw_announcements:
@@ -176,12 +206,23 @@ async def refresh_recent_authorized_capital(
             ann_date_str = ann.get("announcement_date", "")
             ann_date = datetime.fromisoformat(ann_date_str.replace("Z", "+00:00")) if ann_date_str else None
             if not ann_date or (now - ann_date).total_seconds() > hours * 3600:
+                counters["skipped_stale"] += 1
                 continue
         except Exception:
+            counters["skipped_stale"] += 1
             continue
 
-        if not is_pure_authorized_capital(ann):
+        eval_result = evaluate_authorized_capital(ann)
+        
+        if not eval_result["passed"]:
+            if eval_result.get("is_mixed"):
+                counters["rejected_mixed"] += 1
+            else:
+                counters["rejected_low_conf"] += 1
+            counters["routed_general"] += 1
             continue
+            
+        counters["inserted_auth"] += 1
 
         full_text = f"{ann.get('raw_subject', '')} {ann.get('raw_body', '')}".strip()
         auth_data = extract_auth_capital_deterministic(full_text)
@@ -280,13 +321,35 @@ async def refresh_recent_authorized_capital(
     rows.sort(key=lambda x: x.get("announcement_date", ""), reverse=True)
     _auth_live_cache["time"] = now
     _auth_live_cache["data"] = rows
+    
+    print("\n" + "="*60)
+    print("END-TO-END PIPELINE DIAGNOSTICS")
+    print("="*60)
+    print(f"  TOTAL announcements fetched              : {counters['fetched']}")
+    print(f"  TOTAL announcements skipped (stale date) : {counters['skipped_stale']}")
+    print(f"  TOTAL announcements rejected (mixed)     : {counters['rejected_mixed']}")
+    print(f"  TOTAL announcements rejected (low conf)  : {counters['rejected_low_conf']}")
+    print(f"  TOTAL announcements routed to general    : {counters['routed_general']}")
+    print(f"  TOTAL announcements valid & inserted     : {counters['inserted_auth']}")
+    
+    if counters['inserted_auth'] == 0:
+        print("\n  [VERDICT] 0 valid entries found.")
+        print("  Printing top-20 rejected candidates to check for over-rejection...")
+    else:
+        print(f"\n  [VERDICT] Pipeline identified {counters['inserted_auth']} valid entries.")
+    print("="*60 + "\n")
+
+    # Always print top-20 rejected candidates to surface potential over-rejects
+    from agents.classifier import print_top_rejected_candidates
+    print_top_rejected_candidates(20)
+    
     return rows
 
 async def _process_authorized_capital(limit: int) -> int:
     """Process unprocessed authorized capital announcements."""
-    from agents.classifier import extract_auth_capital_deterministic
+    from agents.classifier import extract_auth_capital_deterministic, evaluate_authorized_capital
     from agents.analyst_agent import enrich_announcement
-    from database import get_unprocessed_auth_capital, update_authorized_capital_ai
+    from database import get_unprocessed_auth_capital, update_authorized_capital_ai, demote_to_possible
 
     unprocessed = await get_unprocessed_auth_capital(limit=limit)
     processed_count = 0
@@ -297,18 +360,35 @@ async def _process_authorized_capital(limit: int) -> int:
             if ann.get("pdf_url"):
                 from agents.scraper_agent import extract_pdf_text
                 print(f"INFO: [AUTH] Extracting PDF for {ann.get('company_name')}...")
-                pdf_text = await asyncio.to_thread(extract_pdf_text, ann["pdf_url"])
-                if pdf_text:
-                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_text)[:8000]
+                pdf_res = await asyncio.to_thread(extract_pdf_text, ann["pdf_url"])
+                if pdf_res["success"] and pdf_res["text"]:
+                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_res["text"])[:8000]
+                    ann["extraction_method"] = pdf_res["method"]
+
+            # Re-verify after PDF extraction
+            re_eval = evaluate_authorized_capital(ann)
+            _apply_classification_metadata(ann, re_eval)
+            
+            if re_eval["category"] != "verified":
+                print(f"DEMOTE: {ann.get('company_name')} no longer verified after PDF scan. Demoting.")
+                await demote_to_possible(ann["announcement_id"], "authorized_capital")
+                continue
 
             full_text = (ann.get("raw_subject", "") + " " + ann.get("raw_body", "")).strip()
             auth_data = extract_auth_capital_deterministic(full_text)
+
+            # Auto-demote if extraction failed AND no explicit phrase
+            if not auth_data.get("existing_auth_eq_cap_inr") and not auth_data.get("new_auth_eq_cap_inr"):
+                if not any("explicit phrase" in kw for kw in re_eval.get("matched_kws", [])):
+                    print(f"DEMOTE: {ann.get('company_name')} lacks both extraction and phrases. Demoting.")
+                    await demote_to_possible(ann["announcement_id"], "authorized_capital")
+                    continue
 
             ai_data = {
                 "company_name": ann.get("company_name"),
                 "ticker": ann.get("ticker"),
                 "announcement_type": "Increase in Authorized Capital",
-                "title": "AUTH CAPITAL",
+                "title": "Authorized Capital Restructuring",
                 "description": ann.get("raw_subject", ""),
                 "key_details": ann.get("raw_subject", ""),
                 "sentiment": "Neutral",
@@ -318,6 +398,8 @@ async def _process_authorized_capital(limit: int) -> int:
                 "ai_insight": "Deterministic extraction from the official announcement text and PDF.",
                 "trading_signal": "⚖️ Neutral",
                 "authorized_capital": auth_data,
+                "confidence": ann.get("confidence_level"),
+                "evidence_snippet": ann.get("evidence_snippet")
             }
 
             ai_data = enrich_announcement(ann, ai_data)
@@ -335,19 +417,54 @@ async def _process_authorized_capital(limit: int) -> int:
             excel_row = _build_auth_excel_row(ann, ai_data, auth_data)
             await update_authorized_capital_ai(ann["announcement_id"], ai_data, auth_data, excel_row)
             processed_count += 1
-            print(f"SUCCESS: [AUTH] {ann.get('company_name')} processed ✓")
+            print(f"SUCCESS: [AUTH] {ann.get('company_name')} processed (CONFIDENCE={ann.get('confidence_level')})")
         except Exception as e:
             print(f"ERROR: [AUTH] Processing failed for {ann.get('company_name')}: {e}")
 
+    return processed_count
+
+
+async def _process_possible_capital(limit: int) -> int:
+    """Process candidate filings to see if they can be promoted."""
+    from database import db, promote_to_verified, upsert_possible_capital
+    from agents.classifier import evaluate_authorized_capital
+    from agents.scraper_agent import extract_pdf_text
+    
+    cursor = db.possible_capital.find({"processed": False}).limit(limit)
+    candidates = await cursor.to_list(length=limit)
+    processed_count = 0
+    
+    for ann in candidates:
+        try:
+            if ann.get("pdf_url"):
+                pdf_res = await asyncio.to_thread(extract_pdf_text, ann["pdf_url"])
+                if pdf_res["success"] and pdf_res["text"]:
+                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_res["text"])[:8000]
+            
+            re_eval = evaluate_authorized_capital(ann)
+            _apply_classification_metadata(ann, re_eval)
+            
+            if re_eval["category"] == "verified":
+                await promote_to_verified(ann["announcement_id"], "possible_capital")
+            else:
+                # Mark as processed in possible_capital
+                await db.possible_capital.update_one(
+                    {"announcement_id": ann["announcement_id"]},
+                    {"$set": {"processed": True, "classifier_score": re_eval["score"]}}
+                )
+            processed_count += 1
+        except Exception as e:
+            print(f"ERROR: [POSSIBLE] Failed for {ann.get('company_name')}: {e}")
+            
     return processed_count
 
 async def _process_general_announcements(limit: int) -> int:
     """Process general announcements and promote to Auth Capital if found in PDF."""
     from agents.extractor_agent import extract_announcement
     from agents.analyst_agent import enrich_announcement
-    from agents.classifier import is_pure_authorized_capital
+    from agents.classifier import evaluate_authorized_capital
     from database import (
-        get_unprocessed_general, update_general_announcement_ai, 
+        get_unprocessed_general, update_general_announcement_ai,
         upsert_authorized_capital, db
     )
 
@@ -357,37 +474,64 @@ async def _process_general_announcements(limit: int) -> int:
     for ann in unprocessed:
         try:
             # ── Deep Check: Should we scan the PDF? ──
-            # Suspect subjects that often contain capital changes
+            # NSE uses category labels as the subject. The following categories
+            # are known to contain capital-restructuring content IN the PDF,
+            # not in the one-line boilerplate attchmntText body.
             suspect_subjects = [
-                "outcome of board meeting", "general updates", "updates", 
-                "intimation", "corporate action", "board meeting", "other"
+                # Original suspects
+                "outcome of board meeting", "general updates", "updates",
+                "intimation", "corporate action", "board meeting", "other",
+                # NSE category labels that hide capital content in PDFs
+                "shareholders meeting",        # postal ballot / EGM notices
+                "postal ballot",               # formal postal ballot notices
+                "copy of newspaper publication",  # newspaper ads for postal ballots
+                "egm",                         # extraordinary general meeting
+                "agm",                         # annual general meeting
+                "capital structure",           # direct NSE capital category
+                "allotment",                   # often follows authorized capital increase
             ]
             subject_lower = (ann.get("raw_subject") or "").lower()
-            
+
             needs_pdf_scan = any(s in subject_lower for s in suspect_subjects) or len(ann.get("raw_body", "")) < 200
-            
+
             pdf_text = None
             if needs_pdf_scan and ann.get("pdf_url"):
                 from agents.scraper_agent import extract_pdf_text
                 print(f"INFO: [GEN] Deep scanning PDF for {ann.get('company_name')}...")
-                pdf_text = await asyncio.to_thread(extract_pdf_text, ann["pdf_url"])
-                if pdf_text:
-                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_text)[:8000]
+                pdf_res = await asyncio.to_thread(extract_pdf_text, ann["pdf_url"])
+                if pdf_res["success"] and pdf_res["text"]:
+                    ann["raw_body"] = (ann.get("raw_body", "") + "\n\n" + pdf_res["text"])[:8000]
+                    ann["extraction_method"] = pdf_res["method"]
+                    ann["extraction_success"] = True
+                else:
+                    ann["extraction_error"] = pdf_res["error"]
 
             # ── Check for Promotion ──
-            is_actually_auth_capital = is_pure_authorized_capital(ann)
-
-            if is_actually_auth_capital:
-                print(f"PROMOTION: {ann.get('company_name')} promoted to Authorized Capital! 🚀")
-                # Remove from general
-                await db.general_announcements.delete_one({"announcement_id": ann["announcement_id"]})
-                # Upsert to auth capital (it will be processed in next auth cycle or right away if we add logic)
-                await upsert_authorized_capital(ann)
+            promo_result = evaluate_authorized_capital(ann)
+            _apply_classification_metadata(ann, promo_result)
+            
+            category = promo_result["category"]
+            if category == "verified":
+                print(f"PROMOTE: {ann.get('company_name')} promoted to Verified Auth Capital!")
+                await promote_to_verified(ann["announcement_id"], "general_announcements")
                 continue
+            elif category == "possible":
+                print(f"PROMOTE: {ann.get('company_name')} moved to Possible Capital.")
+                await demote_to_possible(ann["announcement_id"], "general_announcements")
+                continue
+
+            # Re-upsert the general announcement to persist extraction metadata and OCR status even if it doesn't promote
+            await upsert_general_announcement(ann)
 
             # Standard AI extraction for general items
             ai_data = await asyncio.to_thread(extract_announcement, ann)
-            if not ai_data: continue
+            if not ai_data: 
+                # Ensure we don't silently fail, mark as processed with partial status
+                await db.general_announcements.update_one(
+                    {"announcement_id": ann["announcement_id"]},
+                    {"$set": {"processed": True, "failure_reason": "AI extraction failed", "processing_status": "partial"}}
+                )
+                continue
 
             ai_data = enrich_announcement(ann, ai_data)
             

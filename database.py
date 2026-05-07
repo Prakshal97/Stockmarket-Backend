@@ -1,7 +1,8 @@
 """
 MongoDB Atlas connection and CRUD operations using motor (async).
-Dual-collection architecture:
-  - authorized_capital: Only auth capital announcements
+3-tier architecture:
+  - authorized_capital: VERIFIED restructuring filings (High Precision)
+  - possible_capital: Context signals (EGM, Postal Ballot) without verified proof
   - general_announcements: Everything else
 
 Date window: 48 hours for client-facing authorized-capital freshness.
@@ -30,11 +31,19 @@ async def connect_db():
     client = AsyncIOMotorClient(MONGODB_URI)
     db = client[DB_NAME]
 
-    # ── Authorized Capital Collection ─────────────────────────────────────────
+    # ── Authorized Capital Collection (VERIFIED) ──────────────────────────────
     await db.authorized_capital.create_index("announcement_id", unique=True)
     await db.authorized_capital.create_index("announcement_date")
     await db.authorized_capital.create_index("ticker")
+    await db.authorized_capital.create_index("canonical_company")
     await db.authorized_capital.create_index([("processed", 1), ("announcement_date", -1)])
+
+    # ── Possible Capital Related ──────────────────────────────────────────────
+    await db.possible_capital.create_index("announcement_id", unique=True)
+    await db.possible_capital.create_index("announcement_date")
+    await db.possible_capital.create_index("ticker")
+    await db.possible_capital.create_index("canonical_company")
+    await db.possible_capital.create_index([("processed", 1), ("announcement_date", -1)])
 
     # ── General Announcements Collection ──────────────────────────────────────
     await db.general_announcements.create_index("announcement_id", unique=True)
@@ -43,7 +52,7 @@ async def connect_db():
     await db.general_announcements.create_index("processed")
     await db.general_announcements.create_index([("processed", 1), ("announcement_date", -1)])
 
-    print(f"SUCCESS: Connected to MongoDB Atlas (DB: {DB_NAME}, dual-collection mode)")
+    print(f"SUCCESS: Connected to MongoDB Atlas (DB: {DB_NAME}, 3-tier mode)")
 
 
 async def close_db():
@@ -53,6 +62,55 @@ async def close_db():
         client.close()
         print("INFO: MongoDB connection closed")
 
+
+import re
+
+def get_canonical_company_name(name: str) -> str:
+    """Normalize company name for cross-exchange deduplication."""
+    if not name: return ""
+    name = name.upper()
+    # Remove common suffixes
+    suffixes = [
+        r"\s+LIMITED$", r"\s+LTD\.?$", r"\s+INDIA$", r"\s+CORP\.?$", 
+        r"\s+CORPORATION$", r"\s+PVT\.?$", r"\s+PRIVATE$", r"\s+INFRASTRUCTURE$"
+    ]
+    for s in suffixes:
+        name = re.sub(s, "", name).strip()
+    return name
+
+async def is_duplicate_filing(ann: dict) -> bool:
+    """
+    Check if a similar filing already exists for this company 
+    in any of the three collections within a 1-hour window.
+    """
+    canonical = get_canonical_company_name(ann.get("company_name", ""))
+    ann["canonical_company"] = canonical
+    
+    # Check announcement_id first (fastest)
+    for coll_name in ["authorized_capital", "possible_capital", "general_announcements"]:
+        if await db[coll_name].find_one({"announcement_id": ann["announcement_id"]}):
+            return True
+            
+    # Fuzzy check: same canonical company + similar subject + close date
+    date_obj = datetime.fromisoformat(ann["announcement_date"].replace("Z", "+00:00"))
+    start = (date_obj - timedelta(hours=1)).isoformat() + "Z"
+    end = (date_obj + timedelta(hours=1)).isoformat() + "Z"
+    
+    query = {
+        "canonical_company": canonical,
+        "announcement_date": {"$gte": start, "$lte": end}
+    }
+    
+    subject_words = set(re.findall(r'\w+', ann["raw_subject"].lower()))
+    
+    for coll_name in ["authorized_capital", "possible_capital", "general_announcements"]:
+        async for existing in db[coll_name].find(query):
+            existing_words = set(re.findall(r'\w+', existing["raw_subject"].lower()))
+            # If 80% overlap in subject words, consider duplicate
+            intersection = subject_words.intersection(existing_words)
+            if len(subject_words) > 0 and (len(intersection) / len(subject_words)) >= 0.8:
+                return True
+    return False
 
 def _get_cutoff_str(hours: int = DISPLAY_HOURS) -> str:
     """Return ISO cutoff string in UTC for MongoDB string comparison."""
@@ -64,9 +122,21 @@ def _get_cutoff_str(hours: int = DISPLAY_HOURS) -> str:
 async def upsert_authorized_capital(announcement: dict) -> bool:
     """Insert or update an authorized capital announcement. Returns True if new."""
     try:
+        announcement_copy = announcement.copy()
+        update_fields = {}
+        for key in ["classifier_score", "confidence_level", "extraction_method", 
+                   "extraction_success", "extraction_error", "classification_reason", 
+                   "matched_keywords", "rejected_keywords", "raw_body", "pdf_url"]:
+            if key in announcement_copy:
+                update_fields[key] = announcement_copy.pop(key)
+                
+        update_doc = {"$setOnInsert": announcement_copy}
+        if update_fields:
+            update_doc["$set"] = update_fields
+            
         result = await db.authorized_capital.update_one(
             {"announcement_id": announcement["announcement_id"]},
-            {"$setOnInsert": announcement},
+            update_doc,
             upsert=True
         )
         return result.upserted_id is not None
@@ -95,7 +165,13 @@ async def get_authorized_capital_list(
     limit: int = 50,
     skip: int = 0,
 ) -> List[dict]:
-    """Fetch processed authorized capital announcements within DISPLAY_HOURS."""
+    """
+    Fetch processed authorized capital announcements within DISPLAY_HOURS.
+
+    NOTE: Records already passed the weighted classifier at ingestion time.
+    We do NOT re-run the classifier here — that caused legitimate mixed filings
+    (e.g. MOA amendments alongside board meeting outcomes) to be silently dropped.
+    """
     cutoff = _get_cutoff_str(DISPLAY_HOURS)
     query = {"processed": True, "announcement_date": {"$gte": cutoff}}
     projection = {
@@ -129,35 +205,36 @@ async def get_authorized_capital_list(
         "impact": 1,
         "cmp": 1,
         "market_cap_cr": 1,
+        "classifier_score": 1,
+        "confidence_level": 1,
+        "classification_reason": 1,
+        "extraction_method": 1,
+        "evidence_snippet": 1,
     }
     cursor = db.authorized_capital.find(
         query,
         projection=projection,
         sort=[("announcement_date", -1)]
     )
-    rows = await cursor.to_list(length=limit + skip + 50)
+    rows = await cursor.to_list(length=limit + skip + 200)
 
-    from agents.classifier import is_pure_authorized_capital
-
-    filtered = []
     for row in rows:
         row.setdefault("announcement_id", str(row.get("announcement_id") or row.get("_id") or ""))
-        if is_pure_authorized_capital(row):
-            filtered.append(row)
 
-    return filtered[skip: skip + limit]
+    return rows[skip: skip + limit]
 
 
 async def get_authorized_capital_count() -> int:
-    """Count authorized capital announcements within DISPLAY_HOURS."""
+    """
+    Count authorized capital announcements within DISPLAY_HOURS.
+
+    Uses a direct MongoDB count — no re-classification at read time.
+    Records are already classified correctly at write time.
+    """
     cutoff = _get_cutoff_str(DISPLAY_HOURS)
-    cursor = db.authorized_capital.find(
-        {"processed": True, "announcement_date": {"$gte": cutoff}},
-        projection={"_id": 0, "announcement_id": 1, "raw_subject": 1, "raw_body": 1, "title": 1, "ai_data": 1},
+    return await db.authorized_capital.count_documents(
+        {"processed": True, "announcement_date": {"$gte": cutoff}}
     )
-    rows = await cursor.to_list(length=1000)
-    from agents.classifier import is_pure_authorized_capital
-    return sum(1 for row in rows if is_pure_authorized_capital(row))
 
 
 async def get_unprocessed_auth_capital(limit: int = 50) -> List[dict]:
@@ -174,6 +251,7 @@ async def get_unprocessed_auth_capital(limit: int = 50) -> List[dict]:
 async def upsert_general_announcement(announcement: dict) -> bool:
     """Insert or update a general announcement. Returns True if new."""
     try:
+        announcement["canonical_company"] = get_canonical_company_name(announcement.get("company_name", ""))
         result = await db.general_announcements.update_one(
             {"announcement_id": announcement["announcement_id"]},
             {"$setOnInsert": announcement},
@@ -183,6 +261,65 @@ async def upsert_general_announcement(announcement: dict) -> bool:
     except Exception as e:
         print(f"ERROR: General announcement upsert error: {e}")
         return False
+
+
+async def upsert_possible_capital(announcement: dict) -> bool:
+    """Insert or update a candidate capital announcement."""
+    try:
+        announcement["canonical_company"] = get_canonical_company_name(announcement.get("company_name", ""))
+        result = await db.possible_capital.update_one(
+            {"announcement_id": announcement["announcement_id"]},
+            {"$setOnInsert": announcement},
+            upsert=True
+        )
+        return result.upserted_id is not None
+    except Exception as e:
+        print(f"ERROR: Possible capital upsert error: {e}")
+        return False
+
+
+async def get_possible_capital_list(limit: int = 100) -> List[dict]:
+    """Fetch recent potential capital-related announcements."""
+    cutoff = _get_cutoff_str(DISPLAY_HOURS)
+    cursor = db.possible_capital.find(
+        {"announcement_date": {"$gte": cutoff}},
+        sort=[("announcement_date", -1)]
+    ).limit(limit)
+    return await cursor.to_list(length=limit)
+
+
+async def update_possible_capital_ai(announcement_id: str, ai_data: dict):
+    """Save enriched data to possible_capital."""
+    await db.possible_capital.update_one(
+        {"announcement_id": announcement_id},
+        {"$set": {"processed": True, "ai_data": ai_data}}
+    )
+
+
+async def demote_to_possible(announcement_id: str, current_coll: str):
+    """Move a verified entry down to possible if it lacks proof."""
+    doc = await db[current_coll].find_one({"announcement_id": announcement_id})
+    if doc:
+        await db.possible_capital.update_one(
+            {"announcement_id": announcement_id},
+            {"$setOnInsert": doc},
+            upsert=True
+        )
+        await db[current_coll].delete_one({"announcement_id": announcement_id})
+        print(f"DEMOTE: Moved {announcement_id} to possible_capital")
+
+
+async def promote_to_verified(announcement_id: str, current_coll: str):
+    """Move a possible or general entry up to verified."""
+    doc = await db[current_coll].find_one({"announcement_id": announcement_id})
+    if doc:
+        await db.authorized_capital.update_one(
+            {"announcement_id": announcement_id},
+            {"$setOnInsert": doc},
+            upsert=True
+        )
+        await db[current_coll].delete_one({"announcement_id": announcement_id})
+        print(f"PROMOTE: Moved {announcement_id} to verified authorized_capital")
 
 
 async def update_general_announcement_ai(announcement_id: str, ai_data: dict, excel_row: dict):
@@ -262,9 +399,10 @@ async def get_general_count(query: dict = None) -> int:
 # ── Unified Stats ─────────────────────────────────────────────────────────────
 
 async def get_stats() -> dict:
-    """Aggregate stats for dashboard across both collections."""
+    """Aggregate stats for dashboard across all three collections."""
     cutoff = _get_cutoff_str(DISPLAY_HOURS)
     auth_count = await get_authorized_capital_count()
+    possible_count = await db.possible_capital.count_documents({"announcement_date": {"$gte": cutoff}})
 
     pipeline = [
         {"$match": {"processed": True, "announcement_date": {"$gte": cutoff}}},
@@ -312,8 +450,9 @@ async def get_stats() -> dict:
             by_exchange[ex] = by_exchange.get(ex, 0) + row["count"]
 
     return {
-        "total_announcements": general_total + auth_count,
+        "total_announcements": general_total + auth_count + possible_count,
         "auth_capital_count": auth_count,
+        "possible_capital_count": possible_count,
         "general_count": general_total,
         "by_exchange": by_exchange,
         "by_type": by_type,
@@ -324,9 +463,9 @@ async def get_stats() -> dict:
 
 
 async def get_last_fetch_time() -> Optional[str]:
-    """Get the most recent fetched_at timestamp from either collection."""
+    """Get the most recent fetched_at timestamp from all three collections."""
     docs = []
-    for coll_name in ["authorized_capital", "general_announcements"]:
+    for coll_name in ["authorized_capital", "possible_capital", "general_announcements"]:
         doc = await db[coll_name].find_one(
             {},
             sort=[("fetched_at", -1)],
@@ -376,6 +515,8 @@ async def get_db_summary() -> dict:
     gen_processed = await db.general_announcements.count_documents({"processed": True})
     gen_unprocessed = await db.general_announcements.count_documents({"processed": False})
 
+    possible_total = await db.possible_capital.count_documents({})
+
     # Get 5 most recent auth capital
     recent_auth = await db.authorized_capital.find(
         {}, sort=[("announcement_date", -1)]
@@ -398,6 +539,9 @@ async def get_db_summary() -> dict:
             "processed": gen_processed,
             "unprocessed": gen_unprocessed,
         },
+        "possible_capital": {
+            "total": possible_total
+        },
         "display_window_hours": DISPLAY_HOURS,
         "cutoff_utc": _get_cutoff_str(DISPLAY_HOURS),
     }
@@ -410,11 +554,12 @@ async def cleanup_old_announcements(hours: int = CLEANUP_HOURS):
     cutoff = _get_cutoff_str(hours)
 
     r1 = await db.authorized_capital.delete_many({"announcement_date": {"$lt": cutoff}})
-    r2 = await db.general_announcements.delete_many({"announcement_date": {"$lt": cutoff}})
+    r2 = await db.possible_capital.delete_many({"announcement_date": {"$lt": cutoff}})
+    r3 = await db.general_announcements.delete_many({"announcement_date": {"$lt": cutoff}})
 
-    total_deleted = r1.deleted_count + r2.deleted_count
+    total_deleted = r1.deleted_count + r2.deleted_count + r3.deleted_count
     if total_deleted > 0:
-        print(f"CLEANUP: Deleted {r1.deleted_count} auth + {r2.deleted_count} general older than {hours}h")
+        print(f"CLEANUP: Deleted {r1.deleted_count} auth + {r2.deleted_count} possible + {r3.deleted_count} general older than {hours}h")
     return total_deleted
 
 
